@@ -4,20 +4,28 @@ import sqlite3
 from datetime import datetime
 import plotly.express as px
 import re
-import io
 
 # --- CONFIGURAÇÕES INICIAIS ---
 st.set_page_config(page_title="Gestor B3 - Trader Pro", layout="wide")
 
 BLUE_CHIPS = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "MGLU3"]
+LIMITE_ISENCAO = 20000.0
 
+# --- FUNÇÕES DE BANCO DE DADOS ---
 def init_db():
     conn = sqlite3.connect('investimentos.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS operacoes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   data TEXT, ticket TEXT, tipo TEXT, 
-                  quantidade INTEGER, valor REAL)''')
+                  quantidade INTEGER, valor REAL, hora TEXT DEFAULT '00:00:00')''')
+    
+    # Migração para garantir que a coluna 'hora' exista
+    c.execute("PRAGMA table_info(operacoes)")
+    colunas = [info[1] for info in c.fetchall()]
+    if 'hora' not in colunas:
+        c.execute("ALTER TABLE operacoes ADD COLUMN hora TEXT DEFAULT '00:00:00'")
+    
     conn.commit()
     conn.close()
 
@@ -39,11 +47,11 @@ def validar_ticket(tkt):
         return False, f"Ticket '{tkt_limpo}' inválido."
     return True, ""
 
-def salvar_operacao(data, ticket, tipo, qtd, valor):
+def salvar_operacao(data, hora, ticket, tipo, qtd, valor):
     conn = sqlite3.connect('investimentos.db')
     c = conn.cursor()
-    c.execute("INSERT INTO operacoes (data, ticket, tipo, quantidade, valor) VALUES (?,?,?,?,?)",
-              (data, ticket.upper().strip(), tipo, qtd, valor))
+    c.execute("INSERT INTO operacoes (data, hora, ticket, tipo, quantidade, valor) VALUES (?,?,?,?,?,?)",
+              (data, hora, ticket.upper().strip(), tipo, qtd, valor))
     conn.commit()
     conn.close()
 
@@ -55,16 +63,16 @@ def atualizar_banco_pelo_editor(df_editado, df_original):
         for id_del in (ids_originais - ids_atuais):
             conn.execute("DELETE FROM operacoes WHERE id = ?", (int(id_del),))
         for _, row in df_editado.iterrows():
-            ok, _ = validar_ticket(row['ticket'])
-            if ok:
+            if validar_ticket(row['ticket'])[0]:
                 data_str = pd.to_datetime(row['data']).strftime('%Y-%m-%d')
+                hora_str = str(row['hora'])
                 if pd.notna(row['id']):
-                    conn.execute('''UPDATE operacoes SET data=?, ticket=?, tipo=?, quantidade=?, valor=? 
-                                    WHERE id=?''', (data_str, str(row['ticket']).upper().strip(), 
+                    conn.execute('''UPDATE operacoes SET data=?, hora=?, ticket=?, tipo=?, quantidade=?, valor=? 
+                                    WHERE id=?''', (data_str, hora_str, str(row['ticket']).upper().strip(), 
                                                    row['tipo'], int(row['quantidade']), float(row['valor']), int(row['id'])))
                 else:
-                    conn.execute('''INSERT INTO operacoes (data, ticket, tipo, quantidade, valor) 
-                                    VALUES (?,?,?,?,?)''', (data_str, str(row['ticket']).upper().strip(), 
+                    conn.execute('''INSERT INTO operacoes (data, hora, ticket, tipo, quantidade, valor) 
+                                    VALUES (?,?,?,?,?,?)''', (data_str, hora_str, str(row['ticket']).upper().strip(), 
                                                            row['tipo'], int(row['quantidade']), float(row['valor'])))
         conn.commit()
     finally:
@@ -72,7 +80,7 @@ def atualizar_banco_pelo_editor(df_editado, df_original):
 
 def calcular_tudo():
     conn = sqlite3.connect('investimentos.db')
-    df = pd.read_sql_query("SELECT * FROM operacoes ORDER BY data ASC", conn)
+    df = pd.read_sql_query("SELECT * FROM operacoes ORDER BY data ASC, hora ASC", conn)
     conn.close()
     if df.empty: return pd.DataFrame(), pd.DataFrame(), df
 
@@ -81,36 +89,28 @@ def calcular_tudo():
     controle = {} 
 
     for data in sorted(df['data'].dt.date.unique()):
-        df_dia = df[df['data'].dt.date == data]
+        df_dia = df[df['data'].dt.date == data].sort_values('hora')
         for tkt in df_dia['ticket'].unique():
             if tkt not in controle: controle[tkt] = {'qtd': 0, 'pm': 0.0}
             ops = df_dia[df_dia['ticket'] == tkt]
-            qc = ops[ops['tipo']=='Compra']['quantidade'].sum()
-            qv = ops[ops['tipo']=='Venda']['quantidade'].sum()
-            q_dt = min(qc, qv)
-            
-            if q_dt > 0:
-                v_c, v_v = ops[ops['tipo']=='Compra']['valor'].mean(), ops[ops['tipo']=='Venda']['valor'].mean()
-                vendas_realizadas.append({'Data': data, 'Ticket': tkt, 'Qtd': q_dt, 'Tipo': 'Day Trade', 'Resultado': (v_v - v_c)*q_dt, 'Volume Venda': q_dt*v_v})
-
-            sqc, sqv = qc - q_dt, qv - q_dt
-            if sqc > 0:
-                v_compra_m = ops[ops['tipo']=='Compra']['valor'].mean()
-                total_financeiro = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (sqc * v_compra_m)
-                controle[tkt]['qtd'] += sqc
-                controle[tkt]['pm'] = total_financeiro / controle[tkt]['qtd']
-            if sqv > 0:
-                v_venda_m = ops[ops['tipo']=='Venda']['valor'].mean()
-                lucro = (v_venda_m - controle[tkt]['pm']) * sqv
-                vendas_realizadas.append({'Data': data, 'Ticket': tkt, 'Qtd': sqv, 'Tipo': 'Swing Trade', 'Resultado': lucro, 'Volume Venda': sqv * v_venda_m})
-                controle[tkt]['qtd'] -= sqv
+            for _, op in ops.iterrows():
+                if op['tipo'] == 'Compra':
+                    total_fin = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (op['quantidade'] * op['valor'])
+                    controle[tkt]['qtd'] += op['quantidade']
+                    controle[tkt]['pm'] = total_fin / controle[tkt]['qtd'] if controle[tkt]['qtd'] > 0 else 0
+                else: # Venda
+                    resultado = (op['valor'] - controle[tkt]['pm']) * op['quantidade']
+                    vendas_realizadas.append({
+                        'Data': op['data'], 'Hora': op['hora'], 'Ticket': tkt, 
+                        'Qtd': op['quantidade'], 'Resultado': resultado, 
+                        'Volume Venda': op['quantidade'] * op['valor'], 
+                        'Mês/Ano': op['data'].strftime('%Y-%m')
+                    })
+                    controle[tkt]['qtd'] -= op['quantidade']
 
     df_res = pd.DataFrame(vendas_realizadas)
-    if not df_res.empty:
-        df_res['Data'] = pd.to_datetime(df_res['Data'])
-        df_res['Mês/Ano'] = df_res['Data'].dt.to_period('M').astype(str)
-    
-    df_pos = pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} for t, d in controle.items() if d['qtd'] > 0])
+    df_pos = pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} 
+                           for t, d in controle.items() if d['qtd'] > 0])
     return df_pos, df_res, df
 
 @st.dialog("Sucesso")
@@ -118,7 +118,7 @@ def modal_sucesso(msg):
     st.success(msg)
     if st.button("OK"): st.rerun()
 
-# --- INTERFACE ---
+# --- LÓGICA DE INTERFACE ---
 init_db()
 if 'autenticado' not in st.session_state: st.session_state['autenticado'] = False
 
@@ -128,96 +128,74 @@ if not st.session_state['autenticado']:
     if st.button("Entrar"):
         if u == "admin" and p == "1234": st.session_state['autenticado'] = True; st.rerun()
 else:
-    # --- NOVO MENU HOME ---
     pag = st.sidebar.radio("Menu", ["Home", "Registrar", "Posição", "Resultados & IR", "Gestão de Dados"])
     df_pos, df_res, df_raw = calcular_tudo()
 
     if pag == "Home":
         st.header("🏠 Painel de Controle")
-        
-        # Cálculos de indicadores
-        montante_aplicado = df_pos['Total'].sum() if not df_pos.empty else 0.0
-        lucro_acumulado = df_res['Resultado'].sum() if not df_res.empty else 0.0
-        
-        # Lucro do mês corrente
+        montante = df_pos['Total'].sum() if not df_pos.empty else 0.0
+        lucro_tot = df_res['Resultado'].sum() if not df_res.empty else 0.0
         mes_atual = datetime.now().strftime('%Y-%m')
-        if not df_res.empty:
-            lucro_mes = df_res[df_res['Mês/Ano'] == mes_atual]['Resultado'].sum()
-        else:
-            lucro_mes = 0.0
-
-        # Layout de Cards
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Montante Aplicado (Custo)", f"R$ {montante_aplicado:,.2f}")
-        c2.metric("Lucro Acumulado Histórico", f"R$ {lucro_acumulado:,.2f}", 
-                  delta=f"{((lucro_acumulado/montante_aplicado)*100 if montante_aplicado > 0 else 0):.2f}%")
-        c3.metric(f"Lucro em {datetime.now().strftime('%B/%Y')}", f"R$ {lucro_mes:,.2f}")
-
-        st.divider()
+        lucro_mes = df_res[df_res['Mês/Ano'] == mes_atual]['Resultado'].sum() if not df_res.empty else 0.0
         
-        # Gráficos Rápidos na Home
-        col_graf1, col_graf2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Montante Aplicado", f"R$ {montante:,.2f}")
+        c2.metric("Lucro Acumulado Histórico", f"R$ {lucro_tot:,.2f}")
+        c3.metric(f"Lucro em {datetime.now().strftime('%m/%Y')}", f"R$ {lucro_mes:,.2f}")
+        
+        st.divider()
         if not df_res.empty:
             res_mensal = df_res.groupby('Mês/Ano')['Resultado'].sum().reset_index()
-            fig_evol = px.bar(res_mensal, x='Mês/Ano', y='Resultado', title="Evolução Mensal de Lucros/Prejuízos",
-                              color='Resultado', color_continuous_scale=['red', 'green'])
-            col_graf1.plotly_chart(fig_evol, use_container_width=True)
-        
-        if not df_pos.empty:
-            fig_pos = px.pie(df_pos, values='Total', names='Ticket', title="Distribuição de Patrimônio")
-            col_graf2.plotly_chart(fig_pos, use_container_width=True)
-        else:
-            st.info("Adicione operações para visualizar os gráficos.")
+            fig = px.bar(res_mensal, x='Mês/Ano', y='Resultado', title="Evolução de Lucros", color='Resultado', color_continuous_scale=['red', 'green'])
+            st.plotly_chart(fig, use_container_width=True)
 
     elif pag == "Registrar":
-        # ... (Mantido exatamente como na versão anterior)
         st.header("📝 Registrar Operação")
-        tab_sugestao, tab_manual = st.tabs(["🔎 Rápido", "⌨️ Novo Ativo"])
-        with tab_sugestao:
-            with st.form("f1", clear_on_submit=True):
-                tkt = st.selectbox("Ticket", [""] + get_tickers_da_base())
-                tipo = st.selectbox("Tipo", ["Compra", "Venda"])
-                q, v = st.number_input("Qtd", 1), st.number_input("Preço", 0.0)
-                d = st.date_input("Data", datetime.now())
-                if st.form_submit_button("Salvar"):
-                    if validar_ticket(tkt)[0]:
-                        salvar_operacao(d.strftime('%Y-%m-%d'), tkt, tipo, q, v)
-                        modal_sucesso(f"{tkt} Registrado!")
-        with tab_manual:
-            with st.form("f2", clear_on_submit=True):
-                tkt = st.text_input("Novo Ticket")
-                tipo = st.selectbox("Tipo", ["Compra", "Venda"])
-                q, v = st.number_input("Qtd", 1), st.number_input("Preço", 0.0)
-                d = st.date_input("Data", datetime.now())
-                if st.form_submit_button("Cadastrar"):
-                    ok, msg = validar_ticket(tkt)
-                    if ok:
-                        salvar_operacao(d.strftime('%Y-%m-%d'), tkt, tipo, q, v)
-                        modal_sucesso(f"{tkt} Cadastrado!")
-                    else: st.error(msg)
+        hora_sugerida = datetime.now().time()
+        with st.form("reg_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns([2,1,1])
+            tkt = c1.selectbox("Ticket", [""] + get_tickers_da_base())
+            tipo = c2.selectbox("Tipo", ["Compra", "Venda"])
+            d = c3.date_input("Data", datetime.now())
+            
+            c4, c5, c6 = st.columns(3)
+            h = c4.time_input("Hora", hora_sugerida)
+            q = c5.number_input("Quantidade", min_value=1)
+            v = c6.number_input("Preço", min_value=0.0)
+            
+            if st.form_submit_button("Salvar Registro"):
+                ok, msg = validar_ticket(tkt)
+                if ok:
+                    salvar_operacao(d.strftime('%Y-%m-%d'), h.strftime('%H:%M:%S'), tkt, tipo, q, v)
+                    modal_sucesso(f"Operação em {tkt} salva!")
+                else: st.error(msg)
 
     elif pag == "Posição":
         st.header("🏢 Carteira Atual")
         if not df_pos.empty:
             st.dataframe(df_pos.style.format({'Preço Médio': 'R$ {:.2f}', 'Total': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
-        else: st.info("Sua carteira está vazia.")
+        else: st.info("Nenhuma posição aberta.")
 
     elif pag == "Resultados & IR":
-        st.header("📊 Performance e Detalhamento")
+        st.header("📊 Performance e Isenção de IR")
         if not df_res.empty:
-            res_m = df_res.groupby(['Mês/Ano', 'Tipo']).agg({'Resultado': 'sum', 'Volume Venda': 'sum'}).reset_index()
-            for mes in sorted(res_m['Mês/Ano'].unique(), reverse=True):
-                with st.expander(f"📅 Relatório Mensal: {mes}"):
-                    d_mes = res_m[res_m['Mês/Ano'] == mes]
-                    v_st = d_mes[d_mes['Tipo']=='Swing Trade']['Volume Venda'].sum()
-                    l_st = d_mes[d_mes['Tipo']=='Swing Trade']['Resultado'].sum()
-                    l_dt = d_mes[d_mes['Tipo']=='Day Trade']['Resultado'].sum()
-                    ir_st = (l_st * 0.15) if (v_st > 20000 and l_st > 0) else 0
-                    ir_dt = max(0, l_dt * 0.20)
-                    st.write(f"**Volume ST:** R$ {v_st:,.2f} | **Lucro Total:** R$ {l_st+l_dt:,.2f} | **DARF:** R$ {ir_st+ir_dt:,.2f}")
-                    detalhe = df_res[df_res['Mês/Ano'] == mes].copy()
-                    st.dataframe(detalhe[['Data', 'Ticket', 'Tipo', 'Qtd', 'Resultado']], use_container_width=True, hide_index=True)
-        else: st.info("Sem vendas realizadas.")
+            # Monitor de Isenção Mensal
+            mes_atual = datetime.now().strftime('%Y-%m')
+            vendas_mes = df_res[df_res['Mês/Ano'] == mes_atual]['Volume Venda'].sum()
+            progresso = min(vendas_mes / LIMITE_ISENCAO, 1.0)
+            
+            with st.container(border=True):
+                st.subheader(f"Monitor de Isenção (Ações): {datetime.now().strftime('%m/%Y')}")
+                st.write(f"Volume Vendido: **R$ {vendas_mes:,.2f}** / R$ 20.000,00")
+                if vendas_mes >= 20000:
+                    st.error("🚨 Limite ultrapassado! Vendas deste mês são tributadas em 15%.")
+                elif vendas_mes >= 15000:
+                    st.warning("⚠️ Atenção! Você está chegando perto do limite de isenção.")
+                st.progress(progresso)
+
+            st.divider()
+            st.dataframe(df_res.sort_values(['Data', 'Hora'], ascending=False), use_container_width=True, hide_index=True)
+        else: st.info("Nenhuma venda realizada.")
 
     elif pag == "Gestão de Dados":
         st.header("⚙️ Gestão de Dados")
