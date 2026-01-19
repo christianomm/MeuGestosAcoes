@@ -97,8 +97,70 @@ else:
     pag = st.sidebar.radio("Menu", ["Home", "Registrar Operação", "Registrar Proventos", "Posição", "Resultados & IR", "Histórico por Ticket", "Relatório Analítico", "Gestão de Dados"])
     df_pos, df_res, df_raw, df_prov = calcular_tudo()
 
-    # --- HISTÓRICO POR TICKET (RESTAURADO) ---
-    if pag == "Histórico por Ticket":
+    # --- CORREÇÃO: REGISTRAR PROVENTOS (RESTAURADO) ---
+    if pag == "Registrar Proventos":
+        st.header("💰 Registrar Proventos")
+        tkts_p = sorted(list(set(df_raw['ticket'].tolist() if not df_raw.empty else [] + BLUE_CHIPS)))
+        with st.form("form_prov", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            tkt = c1.selectbox("Ticket", tkts_p)
+            tipo_p = c2.selectbox("Tipo", ["Dividendo", "JCP"])
+            val_p = c1.number_input("Valor Recebido", min_value=0.01)
+            data_p = c2.date_input("Data do Pagamento")
+            if st.form_submit_button("Salvar Provento"):
+                conn = sqlite3.connect('investimentos.db')
+                conn.execute("INSERT INTO proventos (data, ticket, tipo, valor) VALUES (?,?,?,?)", 
+                             (data_p.strftime('%Y-%m-%d'), tkt, tipo_p, val_p))
+                conn.commit(); conn.close()
+                st.success("Provento registrado com sucesso!")
+                st.rerun()
+
+    # --- CORREÇÃO: RESULTADOS & IR (CÁLCULO DE IMPOSTO ADICIONADO) ---
+    elif pag == "Resultados & IR":
+        st.header("📊 Resultados e Imposto de Renda")
+        if not df_res.empty:
+            # Agrupar por Mês para Cálculo de IR
+            df_res['Mês/Ano'] = pd.to_datetime(df_res['Data']).dt.strftime('%Y-%m')
+            res_mensal = []
+            
+            for mes in df_res['Mês/Ano'].unique():
+                df_m = df_res[df_res['Mês/Ano'] == mes]
+                
+                # Day Trade
+                dt_res = df_m[df_m['Tipo'] == 'Day Trade']['Resultado'].sum()
+                dt_imp = max(0, dt_res * 0.20) if dt_res > 0 else 0
+                
+                # Swing Trade
+                st_res = df_m[df_m['Tipo'] == 'Swing Trade']['Resultado'].sum()
+                st_vol = df_m[df_m['Tipo'] == 'Swing Trade']['Volume Venda'].sum()
+                # Isenção de 20k para Swing Trade (Ações)
+                st_imp = max(0, st_res * 0.15) if (st_vol > 20000 and st_res > 0) else 0
+                
+                res_mensal.append({
+                    'Mês/Ano': mes,
+                    'Lucro Day Trade': dt_res,
+                    'Imposto DT (20%)': dt_imp,
+                    'Lucro Swing Trade': st_res,
+                    'Volume Venda ST': st_vol,
+                    'Imposto ST (15%)': st_imp,
+                    'Total Imposto': dt_imp + st_imp
+                })
+
+            st.subheader("Resumo Mensal de IR")
+            df_ir = pd.DataFrame(res_mensal)
+            st.table(df_ir.style.format({
+                'Lucro Day Trade': 'R$ {:.2f}', 'Imposto DT (20%)': 'R$ {:.2f}',
+                'Lucro Swing Trade': 'R$ {:.2f}', 'Volume Venda ST': 'R$ {:.2f}',
+                'Imposto ST (15%)': 'R$ {:.2f}', 'Total Imposto': 'R$ {:.2f}'
+            }))
+            
+            st.subheader("Detalhamento das Operações")
+            st.dataframe(df_res.style.format({'Resultado': 'R$ {:.2f}', 'Volume Venda': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
+        else:
+            st.info("Sem vendas realizadas.")
+
+    # --- MANTIDAS AS DEMAIS FUNCIONALIDADES ---
+    elif pag == "Histórico por Ticket":
         st.header("🔍 Consultar Ativo Específico")
         todos_tkts = sorted(df_raw['ticket'].unique().tolist()) if not df_raw.empty else []
         if todos_tkts:
@@ -112,7 +174,6 @@ else:
                 else: st.info("Sem proventos para este ticket.")
         else: st.info("Nenhuma operação registrada.")
 
-    # --- REGISTRAR OPERAÇÃO (RESTAURADO COM HORA E ID) ---
     elif pag == "Registrar Operação":
         st.header("📝 Nova Operação")
         tkts_e = sorted(list(set(df_raw['ticket'].tolist() if not df_raw.empty else [] + BLUE_CHIPS)))
@@ -135,7 +196,6 @@ else:
                                  (data.strftime('%Y-%m-%d'), t_f, tipo, qtd, val, hora.strftime('%H:%M:%S')))
                     conn.commit(); conn.close(); st.success("Salvo!"); st.rerun()
 
-    # --- GESTÃO DE DADOS (PRESERVANDO IDs) ---
     elif pag == "Gestão de Dados":
         st.header("⚙️ Central de Edição")
         st.subheader("Operações")
@@ -146,7 +206,6 @@ else:
             ed_ops.to_sql('operacoes', conn, index=False, if_exists='append')
             conn.commit(); conn.close(); st.success("Atualizado!"); st.rerun()
 
-    # --- MÓDULOS RESTANTES (POSIÇÃO, IR, RELATÓRIO) ---
     elif pag == "Home":
         st.header("🏠 Painel Geral")
         c1, c2, c3 = st.columns(3)
@@ -158,11 +217,6 @@ else:
         st.header("🏢 Carteira Atual")
         if not df_pos.empty: st.dataframe(df_pos.style.format({'Preço Médio': 'R$ {:.2f}', 'Total': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
         else: st.info("Sem posições.")
-
-    elif pag == "Resultados & IR":
-        st.header("📊 Resultados")
-        if not df_res.empty: st.dataframe(df_res.style.format({'Resultado': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
-        else: st.info("Sem vendas.")
 
     elif pag == "Relatório Analítico":
         st.header("📈 Relatório por Ativo")
