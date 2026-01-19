@@ -91,55 +91,38 @@ if not st.session_state['autenticado']:
             st.session_state['autenticado'] = True
             st.rerun()
 else:
-    pag = st.sidebar.radio("Menu", ["Home", "Registrar Operação", "Registrar Proventos", "Posição", "Resultados & IR", "Relatório Analítico", "Gestão de Dados"])
+    # --- MENU LATERAL (ADICIONADO 'HISTÓRICO POR TICKET') ---
+    pag = st.sidebar.radio("Menu", ["Home", "Registrar Operação", "Registrar Proventos", "Posição", "Resultados & IR", "Histórico por Ticket", "Relatório Analítico", "Gestão de Dados"])
     df_pos, df_res, df_raw, df_prov = calcular_tudo()
 
-    # ... (Módulos Home, Registrar Operação, Registrar Proventos, Posição e Resultados permanecem os mesmos)
-
-    if pag == "Gestão de Dados":
-        st.header("⚙️ Central de Edição e Exclusão")
-        st.info("Para **editar**: clique na célula e altere. Para **excluir**: selecione a linha e aperte 'Delete' ou use o ícone de lixeira no canto da tabela.")
+    # --- NOVA ABA: HISTÓRICO POR TICKET ---
+    if pag == "Histórico por Ticket":
+        st.header("🔍 Consultar Ativo Específico")
         
-        # --- EDIÇÃO DE OPERAÇÕES ---
-        st.subheader("📋 Todas as Operações (Compra/Venda)")
-        df_raw_edit = st.data_editor(
-            df_raw, 
-            use_container_width=True, 
-            num_rows="dynamic", 
-            key="editor_operacoes",
-            hide_index=True
-        )
+        todos_tickets = sorted(df_raw['ticket'].unique().tolist()) if not df_raw.empty else []
         
-        if st.button("Salvar Alterações em Operações"):
-            conn = sqlite3.connect('investimentos.db')
-            # Sobrescreve a tabela com os dados do editor (inclui exclusões e edições)
-            df_raw_edit.to_sql('operacoes', conn, if_exists='replace', index=False)
-            conn.commit()
-            conn.close()
-            st.success("Operações atualizadas com sucesso!")
-            st.rerun()
+        if todos_tickets:
+            tkt_escolhido = st.selectbox("Selecione o Ticket para filtrar", todos_tickets)
+            
+            tab_ops, tab_prov = st.tabs(["Operações", "Proventos"])
+            
+            with tab_ops:
+                filtro_ops = df_raw[df_raw['ticket'] == tkt_escolhido].sort_values(['data', 'hora'], ascending=False)
+                st.dataframe(filtro_ops, use_container_width=True, hide_index=True)
+                
+            with tab_prov:
+                if not df_prov.empty:
+                    filtro_prov = df_prov[df_prov['ticket'] == tkt_escolhido].sort_values('data', ascending=False)
+                    if not filtro_prov.empty:
+                        st.dataframe(filtro_prov, use_container_width=True, hide_index=True)
+                    else:
+                        st.info(f"Nenhum provento registrado para {tkt_escolhido}.")
+                else:
+                    st.info("Nenhum provento na base de dados.")
+        else:
+            st.warning("Nenhuma operação registrada para filtrar.")
 
-        st.divider()
-
-        # --- EDIÇÃO DE PROVENTOS ---
-        st.subheader("💰 Registros de Proventos")
-        df_prov_edit = st.data_editor(
-            df_prov, 
-            use_container_width=True, 
-            num_rows="dynamic", 
-            key="editor_proventos",
-            hide_index=True
-        )
-
-        if st.button("Salvar Alterações em Proventos"):
-            conn = sqlite3.connect('investimentos.db')
-            df_prov_edit.to_sql('proventos', conn, if_exists='replace', index=False)
-            conn.commit()
-            conn.close()
-            st.success("Proventos atualizados com sucesso!")
-            st.rerun()
-
-    # ... (Mantenha o restante das rotas como Registrar Operação, Home, etc.)
+    # --- MANTENDO AS FUNCIONALIDADES EXISTENTES ---
     elif pag == "Home":
         st.header("🏠 Painel Geral")
         c1, c2, c3 = st.columns(3)
@@ -206,6 +189,23 @@ else:
             analise.columns = ['Lucro Vendas', 'Proventos']
             analise['Total'] = analise['Lucro Vendas'] + analise['Proventos']
             st.dataframe(analise.sort_values('Total', ascending=False).style.format('R$ {:.2f}'), use_container_width=True)
+
+    elif pag == "Gestão de Dados":
+        st.header("⚙️ Central de Edição")
+        df_raw_edit = st.data_editor(df_raw, use_container_width=True, num_rows="dynamic", key="editor_ops", hide_index=True)
+        if st.button("Salvar Alterações em Operações"):
+            conn = sqlite3.connect('investimentos.db')
+            df_raw_edit.to_sql('operacoes', conn, if_exists='replace', index=False)
+            conn.commit(); conn.close()
+            st.rerun()
+        
+        st.divider()
+        df_prov_edit = st.data_editor(df_prov, use_container_width=True, num_rows="dynamic", key="editor_prov", hide_index=True)
+        if st.button("Salvar Alterações em Proventos"):
+            conn = sqlite3.connect('investimentos.db')
+            df_prov_edit.to_sql('proventos', conn, if_exists='replace', index=False)
+            conn.commit(); conn.close()
+            st.rerun()
 
     if st.sidebar.button("Sair"): 
         st.session_state['autenticado'] = False; st.rerun()
