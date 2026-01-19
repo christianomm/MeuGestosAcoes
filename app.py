@@ -19,95 +19,73 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   data TEXT, ticket TEXT, tipo TEXT, 
                   quantidade INTEGER, valor REAL, hora TEXT DEFAULT '00:00:00')''')
-    c.execute("PRAGMA table_info(operacoes)")
-    colunas = [info[1] for info in c.fetchall()]
-    if 'hora' not in colunas:
-        c.execute("ALTER TABLE operacoes ADD COLUMN hora TEXT DEFAULT '00:00:00'")
+    c.execute('''CREATE TABLE IF NOT EXISTS proventos
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  data TEXT, ticket TEXT, tipo TEXT, valor REAL)''')
     conn.commit()
     conn.close()
-
-def get_tickers_da_base():
-    try:
-        conn = sqlite3.connect('investimentos.db')
-        df = pd.read_sql_query("SELECT DISTINCT ticket FROM operacoes", conn)
-        conn.close()
-        return sorted(list(set(df['ticket'].tolist() + BLUE_CHIPS)))
-    except: return BLUE_CHIPS
-
-def validar_ticket(tkt):
-    if not tkt or str(tkt).strip() == "": return False, "Ticket vazio"
-    return bool(re.match(r'^[A-Z]{4}[0-9]{1,2}$', str(tkt).upper().strip())), ""
-
-def salvar_operacao(data, hora, ticket, tipo, qtd, valor):
-    conn = sqlite3.connect('investimentos.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO operacoes (data, hora, ticket, tipo, quantidade, valor) VALUES (?,?,?,?,?,?)",
-              (data, hora, ticket.upper().strip(), tipo, qtd, valor))
-    conn.commit()
-    conn.close()
-
-def atualizar_banco_pelo_editor(df_editado, df_original):
-    conn = sqlite3.connect('investimentos.db')
-    try:
-        df_editado.to_sql('operacoes', conn, if_exists='replace', index=False)
-        conn.commit()
-    finally: conn.close()
 
 def calcular_tudo():
     conn = sqlite3.connect('investimentos.db')
-    df = pd.read_sql_query("SELECT * FROM operacoes ORDER BY data ASC, hora ASC", conn)
+    df_ops = pd.read_sql_query("SELECT * FROM operacoes ORDER BY data ASC, hora ASC", conn)
+    df_prov = pd.read_sql_query("SELECT * FROM proventos ORDER BY data ASC", conn)
     conn.close()
-    if df.empty: return pd.DataFrame(), pd.DataFrame(), df
+    
+    if df_ops.empty: 
+        return pd.DataFrame(), pd.DataFrame(), df_ops, df_prov
 
-    df['data'] = pd.to_datetime(df['data'])
+    df_ops['data'] = pd.to_datetime(df_ops['data'])
     vendas_realizadas = []
     controle = {} 
 
-    for data_atual in sorted(df['data'].unique()):
+    for data_atual in sorted(df_ops['data'].unique()):
         data_dt = pd.to_datetime(data_atual)
-        df_dia = df[df['data'] == data_dt].sort_values('hora')
+        df_dia = df_ops[df_ops['data'] == data_dt].sort_values('hora')
         
         for tkt in df_dia['ticket'].unique():
-            if tkt not in controle: controle[tkt] = {'qtd': 0, 'pm': 0.0}
+            if tkt not in controle: 
+                controle[tkt] = {'qtd': 0, 'pm': 0.0}
             
-            ops_tkt_dia = df_dia[df_dia['ticket'] == tkt]
-            q_compra_dia = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['quantidade'].sum()
-            q_venda_dia = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['quantidade'].sum()
+            ops_dia = df_dia[df_dia['ticket'] == tkt]
+            q_c = ops_dia[ops_dia['tipo'] == 'Compra']['quantidade'].sum()
+            q_v = ops_dia[ops_dia['tipo'] == 'Venda']['quantidade'].sum()
+            hora_venda = ops_dia[ops_dia['tipo'] == 'Venda']['hora'].iloc[0] if q_v > 0 else "00:00:00"
             
-            # Hora da primeira venda do dia para registro
-            hora_ref = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['hora'].iloc[0] if q_venda_dia > 0 else "00:00:00"
-            
-            # --- LÓGICA DAY TRADE ---
-            qtd_dt = min(q_compra_dia, q_venda_dia)
+            # 1. Day Trade
+            qtd_dt = min(q_c, q_v)
             if qtd_dt > 0:
-                v_compra_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['valor'].mean()
-                v_venda_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['valor'].mean()
+                v_compra_m = ops_dia[ops_dia['tipo'] == 'Compra']['valor'].mean()
+                v_venda_m = ops_dia[ops_dia['tipo'] == 'Venda']['valor'].mean()
                 vendas_realizadas.append({
-                    'Data': data_dt, 'Hora': hora_ref, 'Ticket': tkt, 'Tipo': 'Day Trade',
-                    'Qtd': qtd_dt, 'Resultado': (v_venda_medio - v_compra_medio) * qtd_dt,
-                    'Volume Venda': qtd_dt * v_venda_medio, 'Mês/Ano': data_dt.strftime('%Y-%m')
+                    'Data': data_dt, 'Hora': hora_venda, 'Ticket': tkt, 'Tipo': 'Day Trade', 
+                    'Resultado': (v_venda_m - v_compra_m) * qtd_dt, 
+                    'Volume Venda': qtd_dt * v_venda_m, 'Mês/Ano': data_dt.strftime('%Y-%m')
                 })
 
-            # --- ATUALIZAÇÃO PM ---
-            sobra_compra = q_compra_dia - qtd_dt
-            if sobra_compra > 0:
-                v_compra_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['valor'].mean()
-                total_fin = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (sobra_compra * v_compra_medio)
-                controle[tkt]['qtd'] += sobra_compra
-                controle[tkt]['pm'] = total_fin / controle[tkt]['qtd']
+            # 2. Atualizar Preço Médio
+            sobra_c = q_c - qtd_dt
+            if sobra_c > 0:
+                v_compra_m = ops_dia[ops_dia['tipo'] == 'Compra']['valor'].mean()
+                novo_total = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (sobra_c * v_compra_m)
+                controle[tkt]['qtd'] += sobra_c
+                controle[tkt]['pm'] = novo_total / controle[tkt]['qtd']
 
-            # --- SWING TRADE ---
-            sobra_venda = q_venda_dia - qtd_dt
-            if sobra_venda > 0:
-                v_venda_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['valor'].mean()
+            # 3. Swing Trade
+            sobra_v = q_v - qtd_dt
+            if sobra_v > 0:
+                v_venda_m = ops_dia[ops_dia['tipo'] == 'Venda']['valor'].mean()
                 vendas_realizadas.append({
-                    'Data': data_dt, 'Hora': hora_ref, 'Ticket': tkt, 'Tipo': 'Swing Trade',
-                    'Qtd': sobra_venda, 'Resultado': (v_venda_medio - controle[tkt]['pm']) * sobra_venda,
-                    'Volume Venda': sobra_venda * v_venda_medio, 'Mês/Ano': data_dt.strftime('%Y-%m')
+                    'Data': data_dt, 'Hora': hora_venda, 'Ticket': tkt, 'Tipo': 'Swing Trade', 
+                    'Resultado': (v_venda_m - controle[tkt]['pm']) * sobra_v, 
+                    'Volume Venda': sobra_v * v_venda_m, 'Mês/Ano': data_dt.strftime('%Y-%m')
                 })
-                controle[tkt]['qtd'] -= sobra_venda
+                controle[tkt]['qtd'] -= sobra_v
 
-    return pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} for t, d in controle.items() if d['qtd'] > 0]), pd.DataFrame(vendas_realizadas), df
+    df_pos = pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} 
+                           for t, d in controle.items() if d['qtd'] > 0])
+    df_res = pd.DataFrame(vendas_realizadas)
+    
+    return df_pos, df_res, df_ops, df_prov
 
 # --- INTERFACE ---
 init_db()
@@ -119,67 +97,98 @@ if not st.session_state['autenticado']:
     if st.button("Entrar"):
         if u == "admin" and p == "1234": st.session_state['autenticado'] = True; st.rerun()
 else:
-    pag = st.sidebar.radio("Menu", ["Home", "Registrar", "Posição", "Resultados & IR", "Relatório Analítico", "Gestão de Dados"])
-    df_pos, df_res, df_raw = calcular_tudo()
+    pag = st.sidebar.radio("Menu", ["Home", "Registrar Operação", "Registrar Proventos", "Posição", "Resultados & IR", "Relatório Analítico", "Gestão de Dados"])
+    df_pos, df_res, df_raw, df_prov = calcular_tudo()
 
-    if pag == "Resultados & IR":
-        st.header("📊 Performance e Apuração de IR")
-        if not df_res.empty:
-            # Ordenação segura agora que a coluna 'Hora' existe em df_res
-            df_res_sorted = df_res.sort_values(['Data', 'Hora'], ascending=False)
-            
-            mes_atual = datetime.now().strftime('%Y-%m')
-            vendas_st_mes = df_res[df_res['Mês/Ano'] == mes_atual][df_res['Tipo'] == 'Swing Trade']['Volume Venda'].sum()
-            
-            with st.container(border=True):
-                st.subheader(f"Monitor Swing Trade: {datetime.now().strftime('%m/%Y')}")
-                st.write(f"Volume: **R$ {vendas_st_mes:,.2f}** / R$ 20.000,00")
-                st.progress(min(vendas_st_mes / LIMITE_ISENCAO, 1.0))
-
-            st.divider()
-            st.dataframe(df_res_sorted, use_container_width=True, hide_index=True)
+    # --- MÓDULO: POSIÇÃO (CORRIGIDO) ---
+    if pag == "Posição":
+        st.header("🏢 Carteira Atual (Ações em Custódia)")
+        if not df_pos.empty:
+            st.dataframe(df_pos.style.format({'Preço Médio': 'R$ {:.2f}', 'Total': 'R$ {:.2f}'}), 
+                         use_container_width=True, hide_index=True)
         else:
-            st.info("Nenhuma venda realizada.")
+            st.info("Nenhuma ação em custódia no momento.")
 
-    elif pag == "Relatório Analítico":
-        st.header("📈 Relatório Analítico de Vendas")
-        if not df_res.empty:
-            tab1, tab2 = st.tabs(["Consolidado por Ticket", "Mensal por Ticket"])
-            with tab1:
-                consolidado = df_res.groupby('Ticket').agg({'Resultado': 'sum', 'Volume Venda': 'sum'}).reset_index().sort_values(by='Resultado', ascending=False)
-                st.dataframe(consolidado, use_container_width=True, hide_index=True)
-            with tab2:
-                mensal = df_res.groupby(['Mês/Ano', 'Ticket']).agg({'Resultado': 'sum', 'Volume Venda': 'sum'}).reset_index().sort_values(by=['Mês/Ano', 'Resultado'], ascending=[False, False])
-                st.dataframe(mensal, use_container_width=True, hide_index=True)
-        else: st.info("Sem dados.")
-
-    # ... (Módulos Home, Registrar, Posição e Gestão seguem a mesma lógica do seu código anterior)
-    elif pag == "Home":
-        st.header("🏠 Painel de Controle")
-        montante = df_pos['Total'].sum() if not df_pos.empty else 0.0
-        lucro_tot = df_res['Resultado'].sum() if not df_res.empty else 0.0
-        c1, c2 = st.columns(2)
-        c1.metric("Patrimônio Atual", f"R$ {montante:,.2f}")
-        c2.metric("Lucro Total Vendas", f"R$ {lucro_tot:,.2f}")
-
-    elif pag == "Registrar":
-        st.header("📝 Registrar Operação")
-        with st.form("reg"):
-            tkt = st.selectbox("Ticket", get_tickers_da_base())
-            tipo = st.selectbox("Tipo", ["Compra", "Venda"])
-            q = st.number_input("Qtd", 1)
-            v = st.number_input("Preço", 0.0)
-            d = st.date_input("Data")
-            h = st.time_input("Hora")
-            if st.form_submit_button("Salvar"):
-                salvar_operacao(d.strftime('%Y-%m-%d'), h.strftime('%H:%M:%S'), tkt, tipo, q, v)
+    # --- MÓDULO: REGISTRAR PROVENTOS (CORRIGIDO) ---
+    elif pag == "Registrar Proventos":
+        st.header("💰 Registrar Dividendos / JCP")
+        # Busca tickets das operações para facilitar a seleção
+        lista_tickets = sorted(list(set(df_raw['ticket'].tolist() + BLUE_CHIPS))) if not df_raw.empty else BLUE_CHIPS
+        
+        with st.form("form_prov", clear_on_submit=True):
+            tkt = st.selectbox("Ticket", lista_tickets)
+            tipo_p = st.selectbox("Tipo", ["Dividendo", "JCP"])
+            val_p = st.number_input("Valor Líquido Recebido", min_value=0.01, step=0.01)
+            data_p = st.date_input("Data do Pagamento")
+            
+            if st.form_submit_button("Salvar Provento"):
+                conn = sqlite3.connect('investimentos.db')
+                conn.execute("INSERT INTO proventos (data, ticket, tipo, valor) VALUES (?,?,?,?)", 
+                             (data_p.strftime('%Y-%m-%d'), tkt, tipo_p, val_p))
+                conn.commit()
+                conn.close()
+                st.success(f"Provento de {tkt} registrado!")
                 st.rerun()
 
-    elif pag == "Gestão de Dados":
-        st.header("⚙️ Gestão")
-        df_edit = st.data_editor(df_raw, num_rows="dynamic", use_container_width=True)
-        if st.button("Confirmar Alterações"):
-            atualizar_banco_pelo_editor(df_edit, df_raw)
-            st.rerun()
+    # --- MÓDULO: RESULTADOS & IR (REVISADO) ---
+    elif pag == "Resultados & IR":
+        st.header("📊 Performance e Tributação")
+        if not df_res.empty:
+            mes_at = datetime.now().strftime('%Y-%m')
+            vendas_st = df_res[(df_res['Mês/Ano'] == mes_at) & (df_res['Tipo'] == 'Swing Trade')]['Volume Venda'].sum()
+            
+            st.metric("Volume Venda Swing Trade (Mês Atual)", f"R$ {vendas_st:,.2f}", 
+                      delta=f"{LIMITE_ISENCAO - vendas_st:,.2f} p/ Isenção", delta_color="normal")
+            
+            df_res_view = df_res.sort_values(['Data', 'Hora'], ascending=False).copy()
+            df_res_view['Data'] = df_res_view['Data'].dt.strftime('%d/%m/%Y')
+            st.dataframe(df_res_view.style.format({'Resultado': 'R$ {:.2f}', 'Volume Venda': 'R$ {:.2f}'}), 
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("Sem histórico de vendas.")
 
-    if st.sidebar.button("Sair"): st.session_state['autenticado'] = False; st.rerun()
+    elif pag == "Home":
+        st.header("🏠 Painel Geral")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Patrimônio Atual", f"R$ {df_pos['Total'].sum() if not df_pos.empty else 0:,.2f}")
+        c2.metric("Lucro Vendas", f"R$ {df_res['Resultado'].sum() if not df_res.empty else 0:,.2f}")
+        c3.metric("Total Proventos", f"R$ {df_prov['valor'].sum() if not df_prov.empty else 0:,.2f}")
+
+    elif pag == "Registrar Operação":
+        st.header("📝 Nova Operação")
+        with st.form("f_op", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            tkt = c1.text_input("Ticket").upper().strip()
+            tipo = c2.selectbox("Tipo", ["Compra", "Venda"])
+            data = c3.date_input("Data")
+            c4, c5, c6 = st.columns(3)
+            qtd = c4.number_input("Quantidade", min_value=1)
+            val = c5.number_input("Preço Unitário", min_value=0.01)
+            hora = c6.time_input("Hora")
+            if st.form_submit_button("Salvar Operação"):
+                if len(tkt) < 5: st.error("Ticket inválido"); st.stop()
+                conn = sqlite3.connect('investimentos.db')
+                conn.execute("INSERT INTO operacoes (data, ticket, tipo, quantidade, valor, hora) VALUES (?,?,?,?,?,?)",
+                             (data.strftime('%Y-%m-%d'), tkt, tipo, qtd, val, hora.strftime('%H:%M:%S')))
+                conn.commit(); conn.close()
+                st.rerun()
+
+    elif pag == "Relatório Analítico":
+        st.header("📈 Desempenho Consolidado por Ativo")
+        if not df_res.empty or not df_prov.empty:
+            res_v = df_res.groupby('Ticket')['Resultado'].sum() if not df_res.empty else pd.Series(dtype=float)
+            res_p = df_prov.groupby('ticket')['valor'].sum() if not df_prov.empty else pd.Series(dtype=float)
+            analise = pd.concat([res_v, res_p], axis=1).fillna(0)
+            analise.columns = ['Lucro Vendas', 'Proventos']
+            analise['Total'] = analise['Lucro Vendas'] + analise['Proventos']
+            st.dataframe(analise.sort_values('Total', ascending=False).style.format('R$ {:.2f}'), use_container_width=True)
+
+    elif pag == "Gestão de Dados":
+        st.header("⚙️ Editor do Banco de Dados")
+        st.subheader("Operações de Compra/Venda")
+        st.data_editor(df_raw, key="ed_ops", use_container_width=True, hide_index=True)
+        st.subheader("Registros de Proventos")
+        st.data_editor(df_prov, key="ed_prov", use_container_width=True, hide_index=True)
+
+    if st.sidebar.button("Sair"): 
+        st.session_state['autenticado'] = False; st.rerun()
