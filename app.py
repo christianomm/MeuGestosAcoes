@@ -20,7 +20,6 @@ def init_db():
                   data TEXT, ticket TEXT, tipo TEXT, 
                   quantidade INTEGER, valor REAL, hora TEXT DEFAULT '00:00:00')''')
     
-    # Migração para garantir que a coluna 'hora' exista
     c.execute("PRAGMA table_info(operacoes)")
     colunas = [info[1] for info in c.fetchall()]
     if 'hora' not in colunas:
@@ -88,25 +87,47 @@ def calcular_tudo():
     vendas_realizadas = []
     controle = {} 
 
+    # Processamento por data para capturar Day Trade
     for data in sorted(df['data'].dt.date.unique()):
         df_dia = df[df['data'].dt.date == data].sort_values('hora')
+        
         for tkt in df_dia['ticket'].unique():
             if tkt not in controle: controle[tkt] = {'qtd': 0, 'pm': 0.0}
-            ops = df_dia[df_dia['ticket'] == tkt]
-            for _, op in ops.iterrows():
-                if op['tipo'] == 'Compra':
-                    total_fin = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (op['quantidade'] * op['valor'])
-                    controle[tkt]['qtd'] += op['quantidade']
-                    controle[tkt]['pm'] = total_fin / controle[tkt]['qtd'] if controle[tkt]['qtd'] > 0 else 0
-                else: # Venda
-                    resultado = (op['valor'] - controle[tkt]['pm']) * op['quantidade']
-                    vendas_realizadas.append({
-                        'Data': op['data'], 'Hora': op['hora'], 'Ticket': tkt, 
-                        'Qtd': op['quantidade'], 'Resultado': resultado, 
-                        'Volume Venda': op['quantidade'] * op['valor'], 
-                        'Mês/Ano': op['data'].strftime('%Y-%m')
-                    })
-                    controle[tkt]['qtd'] -= op['quantidade']
+            
+            ops_tkt_dia = df_dia[df_dia['ticket'] == tkt]
+            q_compra_dia = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['quantidade'].sum()
+            q_venda_dia = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['quantidade'].sum()
+            
+            # --- LÓGICA DAY TRADE ---
+            qtd_dt = min(q_compra_dia, q_venda_dia)
+            if qtd_dt > 0:
+                v_compra_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['valor'].mean()
+                v_venda_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['valor'].mean()
+                vendas_realizadas.append({
+                    'Data': pd.Timestamp(data), 'Ticket': tkt, 'Tipo': 'Day Trade',
+                    'Qtd': qtd_dt, 'Resultado': (v_venda_medio - v_compra_medio) * qtd_dt,
+                    'Volume Venda': qtd_dt * v_venda_medio, 'Mês/Ano': data.strftime('%Y-%m')
+                })
+
+            # --- ATUALIZAÇÃO DE PREÇO MÉDIO (COMPRAS QUE NÃO FORAM DAY TRADE) ---
+            sobra_compra = q_compra_dia - qtd_dt
+            if sobra_compra > 0:
+                v_compra_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Compra']['valor'].mean()
+                total_fin = (controle[tkt]['qtd'] * controle[tkt]['pm']) + (sobra_compra * v_compra_medio)
+                controle[tkt]['qtd'] += sobra_compra
+                controle[tkt]['pm'] = total_fin / controle[tkt]['qtd']
+
+            # --- LÓGICA SWING TRADE (VENDAS QUE NÃO FORAM DAY TRADE) ---
+            sobra_venda = q_venda_dia - qtd_dt
+            if sobra_venda > 0:
+                v_venda_medio = ops_tkt_dia[ops_tkt_dia['tipo'] == 'Venda']['valor'].mean()
+                resultado_st = (v_venda_medio - controle[tkt]['pm']) * sobra_venda
+                vendas_realizadas.append({
+                    'Data': pd.Timestamp(data), 'Ticket': tkt, 'Tipo': 'Swing Trade',
+                    'Qtd': sobra_venda, 'Resultado': resultado_st,
+                    'Volume Venda': sobra_venda * v_venda_medio, 'Mês/Ano': data.strftime('%Y-%m')
+                })
+                controle[tkt]['qtd'] -= sobra_venda
 
     df_res = pd.DataFrame(vendas_realizadas)
     df_pos = pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} 
@@ -157,12 +178,10 @@ else:
             tkt = c1.selectbox("Ticket", [""] + get_tickers_da_base())
             tipo = c2.selectbox("Tipo", ["Compra", "Venda"])
             d = c3.date_input("Data", datetime.now())
-            
             c4, c5, c6 = st.columns(3)
             h = c4.time_input("Hora", hora_sugerida)
             q = c5.number_input("Quantidade", min_value=1)
             v = c6.number_input("Preço", min_value=0.0)
-            
             if st.form_submit_button("Salvar Registro"):
                 ok, msg = validar_ticket(tkt)
                 if ok:
@@ -177,24 +196,54 @@ else:
         else: st.info("Nenhuma posição aberta.")
 
     elif pag == "Resultados & IR":
-        st.header("📊 Performance e Isenção de IR")
+        st.header("📊 Performance e Apuração de IR")
         if not df_res.empty:
-            # Monitor de Isenção Mensal
+            # Monitor de Isenção Mensal (Apenas para Swing Trade)
             mes_atual = datetime.now().strftime('%Y-%m')
-            vendas_mes = df_res[df_res['Mês/Ano'] == mes_atual]['Volume Venda'].sum()
-            progresso = min(vendas_mes / LIMITE_ISENCAO, 1.0)
+            df_mes_atual = df_res[df_res['Mês/Ano'] == mes_atual]
+            vendas_st_mes = df_mes_atual[df_mes_atual['Tipo'] == 'Swing Trade']['Volume Venda'].sum()
+            
+            progresso = min(vendas_st_mes / LIMITE_ISENCAO, 1.0)
             
             with st.container(border=True):
-                st.subheader(f"Monitor de Isenção (Ações): {datetime.now().strftime('%m/%Y')}")
-                st.write(f"Volume Vendido: **R$ {vendas_mes:,.2f}** / R$ 20.000,00")
-                if vendas_mes >= 20000:
-                    st.error("🚨 Limite ultrapassado! Vendas deste mês são tributadas em 15%.")
-                elif vendas_mes >= 15000:
-                    st.warning("⚠️ Atenção! Você está chegando perto do limite de isenção.")
+                st.subheader(f"Monitor de Isenção (Swing Trade): {datetime.now().strftime('%m/%Y')}")
+                st.write(f"Volume Vendido ST: **R$ {vendas_st_mes:,.2f}** / R$ 20.000,00")
+                if vendas_st_mes >= LIMITE_ISENCAO:
+                    st.error("🚨 Limite de R$ 20k ultrapassado! Lucros de Swing Trade serão tributados (15%).")
+                elif vendas_st_mes >= 15000:
+                    st.warning("⚠️ Atenção! Você está se aproximando do limite de isenção.")
                 st.progress(progresso)
 
             st.divider()
-            st.dataframe(df_res.sort_values(['Data', 'Hora'], ascending=False), use_container_width=True, hide_index=True)
+
+            # Tabela detalhada com identificação de tipo
+            st.subheader("Histórico de Vendas e Tributação")
+            
+            # Formatação para exibição
+            df_display = df_res.copy()
+            df_display['Data'] = df_display['Data'].dt.strftime('%d/%m/%Y')
+            
+            # Lógica de imposto simplificada para visualização
+            def calc_ir(row):
+                if row['Tipo'] == 'Day Trade':
+                    return row['Resultado'] * 0.20 if row['Resultado'] > 0 else 0
+                else: # Swing Trade
+                    vendas_st_total_mes = df_res[(df_res['Mês/Ano'] == row['Mês/Ano']) & (df_res['Tipo'] == 'Swing Trade')]['Volume Venda'].sum()
+                    if vendas_st_total_mes > LIMITE_ISENCAO and row['Resultado'] > 0:
+                        return row['Resultado'] * 0.15
+                    return 0
+
+            df_display['Imposto Est.'] = df_display.apply(calc_ir, axis=1)
+            
+            st.dataframe(
+                df_display.sort_values(['Mês/Ano', 'Data'], ascending=False).style.format({
+                    'Resultado': 'R$ {:.2f}', 
+                    'Volume Venda': 'R$ {:.2f}',
+                    'Imposto Est.': 'R$ {:.2f}'
+                }), 
+                use_container_width=True, 
+                hide_index=True
+            )
         else: st.info("Nenhuma venda realizada.")
 
     elif pag == "Gestão de Dados":
