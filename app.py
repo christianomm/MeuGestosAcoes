@@ -3,13 +3,11 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 import plotly.express as px
-import re
 
 # --- CONFIGURAÇÕES INICIAIS ---
 st.set_page_config(page_title="Gestor B3 - Trader Pro", layout="wide")
 
 BLUE_CHIPS = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "MGLU3"]
-LIMITE_ISENCAO = 20000.0
 
 # --- FUNÇÕES DE BANCO DE DADOS ---
 def init_db():
@@ -43,9 +41,7 @@ def calcular_tudo():
         df_dia = df_ops[df_ops['data'] == data_dt].sort_values('hora')
         
         for tkt in df_dia['ticket'].unique():
-            if tkt not in controle: 
-                controle[tkt] = {'qtd': 0, 'pm': 0.0}
-            
+            if tkt not in controle: controle[tkt] = {'qtd': 0, 'pm': 0.0}
             ops_dia = df_dia[df_dia['ticket'] == tkt]
             q_c = ops_dia[ops_dia['tipo'] == 'Compra']['quantidade'].sum()
             q_v = ops_dia[ops_dia['tipo'] == 'Venda']['quantidade'].sum()
@@ -81,7 +77,6 @@ def calcular_tudo():
     df_pos = pd.DataFrame([{'Ticket': t, 'Quantidade': d['qtd'], 'Preço Médio': d['pm'], 'Total': d['qtd']*d['pm']} 
                            for t, d in controle.items() if d['qtd'] > 0])
     df_res = pd.DataFrame(vendas_realizadas)
-    
     return df_pos, df_res, df_ops, df_prov
 
 # --- INICIALIZAÇÃO ---
@@ -96,11 +91,56 @@ if not st.session_state['autenticado']:
             st.session_state['autenticado'] = True
             st.rerun()
 else:
-    # --- MENU LATERAL ---
     pag = st.sidebar.radio("Menu", ["Home", "Registrar Operação", "Registrar Proventos", "Posição", "Resultados & IR", "Relatório Analítico", "Gestão de Dados"])
     df_pos, df_res, df_raw, df_prov = calcular_tudo()
 
-    if pag == "Home":
+    # ... (Módulos Home, Registrar Operação, Registrar Proventos, Posição e Resultados permanecem os mesmos)
+
+    if pag == "Gestão de Dados":
+        st.header("⚙️ Central de Edição e Exclusão")
+        st.info("Para **editar**: clique na célula e altere. Para **excluir**: selecione a linha e aperte 'Delete' ou use o ícone de lixeira no canto da tabela.")
+        
+        # --- EDIÇÃO DE OPERAÇÕES ---
+        st.subheader("📋 Todas as Operações (Compra/Venda)")
+        df_raw_edit = st.data_editor(
+            df_raw, 
+            use_container_width=True, 
+            num_rows="dynamic", 
+            key="editor_operacoes",
+            hide_index=True
+        )
+        
+        if st.button("Salvar Alterações em Operações"):
+            conn = sqlite3.connect('investimentos.db')
+            # Sobrescreve a tabela com os dados do editor (inclui exclusões e edições)
+            df_raw_edit.to_sql('operacoes', conn, if_exists='replace', index=False)
+            conn.commit()
+            conn.close()
+            st.success("Operações atualizadas com sucesso!")
+            st.rerun()
+
+        st.divider()
+
+        # --- EDIÇÃO DE PROVENTOS ---
+        st.subheader("💰 Registros de Proventos")
+        df_prov_edit = st.data_editor(
+            df_prov, 
+            use_container_width=True, 
+            num_rows="dynamic", 
+            key="editor_proventos",
+            hide_index=True
+        )
+
+        if st.button("Salvar Alterações em Proventos"):
+            conn = sqlite3.connect('investimentos.db')
+            df_prov_edit.to_sql('proventos', conn, if_exists='replace', index=False)
+            conn.commit()
+            conn.close()
+            st.success("Proventos atualizados com sucesso!")
+            st.rerun()
+
+    # ... (Mantenha o restante das rotas como Registrar Operação, Home, etc.)
+    elif pag == "Home":
         st.header("🏠 Painel Geral")
         c1, c2, c3 = st.columns(3)
         c1.metric("Patrimônio Atual", f"R$ {df_pos['Total'].sum() if not df_pos.empty else 0:,.2f}")
@@ -109,35 +149,25 @@ else:
 
     elif pag == "Registrar Operação":
         st.header("📝 Nova Operação")
-        
-        # Lista dinâmica de tickets (existentes na base + Blue Chips)
         tickets_existentes = sorted(list(set(df_raw['ticket'].tolist() if not df_raw.empty else [] + BLUE_CHIPS)))
-        tickets_existentes.insert(0, "DIGITAR NOVO TICKET...") # Opção para novo
-        
+        tickets_existentes.insert(0, "DIGITAR NOVO TICKET...") 
         with st.form("f_op", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
-            tkt_selecionado = c1.selectbox("Selecione o Ticket", tickets_existentes)
-            tkt_novo = c1.text_input("Ou digite o novo Ticket (se selecionou 'DIGITAR NOVO')").upper().strip()
-            
+            tkt_sel = c1.selectbox("Selecione o Ticket", tickets_existentes)
+            tkt_novo = c1.text_input("Ou digite o novo Ticket").upper().strip()
             tipo = c2.selectbox("Tipo", ["Compra", "Venda"])
             data = c3.date_input("Data", datetime.now())
-            
             c4, c5, c6 = st.columns(3)
             qtd = c4.number_input("Quantidade", min_value=1)
             val = c5.number_input("Preço Unitário", min_value=0.01)
             hora = c6.time_input("Hora", datetime.now().time())
-            
             if st.form_submit_button("Salvar Operação"):
-                tkt_final = tkt_novo if tkt_selecionado == "DIGITAR NOVO TICKET..." else tkt_selecionado
-                
-                if not tkt_final or tkt_final == "":
-                    st.error("Informe um Ticket válido.")
-                else:
+                tkt_f = tkt_novo if tkt_sel == "DIGITAR NOVO TICKET..." else tkt_sel
+                if tkt_f:
                     conn = sqlite3.connect('investimentos.db')
                     conn.execute("INSERT INTO operacoes (data, ticket, tipo, quantidade, valor, hora) VALUES (?,?,?,?,?,?)",
-                                 (data.strftime('%Y-%m-%d'), tkt_final, tipo, qtd, val, hora.strftime('%H:%M:%S')))
+                                 (data.strftime('%Y-%m-%d'), tkt_f, tipo, qtd, val, hora.strftime('%H:%M:%S')))
                     conn.commit(); conn.close()
-                    st.success(f"Operação em {tkt_final} salva!")
                     st.rerun()
 
     elif pag == "Registrar Proventos":
@@ -148,18 +178,16 @@ else:
             tipo_p = st.selectbox("Tipo", ["Dividendo", "JCP"])
             val_p = st.number_input("Valor Recebido", min_value=0.01)
             data_p = st.date_input("Data do Pagamento")
-            if st.form_submit_button("Salvar Provento"):
+            if st.form_submit_button("Salvar"):
                 conn = sqlite3.connect('investimentos.db')
-                conn.execute("INSERT INTO proventos (data, ticket, tipo, valor) VALUES (?,?,?,?)", 
-                             (data_p.strftime('%Y-%m-%d'), tkt, tipo_p, val_p))
+                conn.execute("INSERT INTO proventos (data, ticket, tipo, valor) VALUES (?,?,?,?)", (data_p.strftime('%Y-%m-%d'), tkt, tipo_p, val_p))
                 conn.commit(); conn.close()
-                st.success("Provento salvo!"); st.rerun()
+                st.rerun()
 
     elif pag == "Posição":
         st.header("🏢 Carteira Atual")
-        if not df_pos.empty:
-            st.dataframe(df_pos.style.format({'Preço Médio': 'R$ {:.2f}', 'Total': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
-        else: st.info("Sem posições abertas.")
+        if not df_pos.empty: st.dataframe(df_pos.style.format({'Preço Médio': 'R$ {:.2f}', 'Total': 'R$ {:.2f}'}), use_container_width=True, hide_index=True)
+        else: st.info("Sem posições.")
 
     elif pag == "Resultados & IR":
         st.header("📊 Performance e IR")
@@ -167,7 +195,7 @@ else:
             df_res_view = df_res.sort_values(['Data', 'Hora'], ascending=False).copy()
             df_res_view['Data'] = df_res_view['Data'].dt.strftime('%d/%m/%Y')
             st.dataframe(df_res_view, use_container_width=True, hide_index=True)
-        else: st.info("Sem vendas realizadas.")
+        else: st.info("Sem vendas.")
 
     elif pag == "Relatório Analítico":
         st.header("📈 Relatório por Ativo")
@@ -178,13 +206,6 @@ else:
             analise.columns = ['Lucro Vendas', 'Proventos']
             analise['Total'] = analise['Lucro Vendas'] + analise['Proventos']
             st.dataframe(analise.sort_values('Total', ascending=False).style.format('R$ {:.2f}'), use_container_width=True)
-
-    elif pag == "Gestão de Dados":
-        st.header("⚙️ Gestão de Dados")
-        st.subheader("Operações")
-        st.data_editor(df_raw, use_container_width=True, key="ed_ops")
-        st.subheader("Proventos")
-        st.data_editor(df_prov, use_container_width=True, key="ed_prov")
 
     if st.sidebar.button("Sair"): 
         st.session_state['autenticado'] = False; st.rerun()
