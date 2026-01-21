@@ -414,6 +414,58 @@ def calcular_ir_completo(df_res):
     
     return pd.DataFrame(res_mensal)
 
+# --- NOVA FUNÇÃO: CALCULAR RESULTADOS DO DIA ---
+def calcular_resultados_dia(df_res, data_referencia=None):
+    """Calcula resultados das operações do dia."""
+    if df_res.empty:
+        return None
+    
+    if data_referencia is None:
+        data_referencia = datetime.now().date()
+    
+    # Converter coluna Data para datetime se necessário
+    if not pd.api.types.is_datetime64_any_dtype(df_res['Data']):
+        df_res_temp = df_res.copy()
+        df_res_temp['Data'] = pd.to_datetime(df_res_temp['Data'])
+    else:
+        df_res_temp = df_res
+    
+    # Filtrar operações do dia
+    df_dia = df_res_temp[df_res_temp['Data'].dt.date == data_referencia]
+    
+    if df_dia.empty:
+        return None
+    
+    # Calcular totais
+    resultado_total = df_dia['Resultado'].sum()
+    volume_total = df_dia['Volume Venda'].sum()
+    num_operacoes = len(df_dia)
+    
+    # Separar por tipo
+    dt_ops = df_dia[df_dia['Tipo'] == 'Day Trade']
+    st_ops = df_dia[df_dia['Tipo'] == 'Swing Trade']
+    
+    resultado_dt = dt_ops['Resultado'].sum() if not dt_ops.empty else 0
+    resultado_st = st_ops['Resultado'].sum() if not st_ops.empty else 0
+    
+    # Operações positivas e negativas
+    ops_positivas = len(df_dia[df_dia['Resultado'] > 0])
+    ops_negativas = len(df_dia[df_dia['Resultado'] < 0])
+    
+    taxa_acerto = (ops_positivas / num_operacoes * 100) if num_operacoes > 0 else 0
+    
+    return {
+        'df_operacoes': df_dia,
+        'resultado_total': resultado_total,
+        'volume_total': volume_total,
+        'num_operacoes': num_operacoes,
+        'resultado_dt': resultado_dt,
+        'resultado_st': resultado_st,
+        'ops_positivas': ops_positivas,
+        'ops_negativas': ops_negativas,
+        'taxa_acerto': taxa_acerto
+    }
+
 # --- FUNÇÕES DE GERAÇÃO DE PDF DARF ---
 def gerar_darf_pdf(mes_ano, df_ir_mes, tipo_imposto='CONSOLIDADO'):
     """Gera PDF da DARF com dados fiscais."""
@@ -809,6 +861,107 @@ else:
         col2.metric("📈 Lucro em Vendas", f"R$ {lucro_vendas:,.2f}")
         col3.metric("💰 Proventos", f"R$ {proventos:,.2f}")
         col4.metric("🧾 IR Mês Atual", f"R$ {ir_mes:,.2f}")
+        
+        st.markdown("---")
+        
+        # === NOVA SEÇÃO: RESULTADOS DO DIA ===
+        st.subheader(f"📅 Resultados de Hoje ({datetime.now().strftime('%d/%m/%Y')})")
+        
+        resultados_dia = calcular_resultados_dia(df_res)
+        
+        if resultados_dia:
+            # Métricas do dia
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            # Cor do resultado total
+            cor_resultado = "normal" if resultados_dia['resultado_total'] >= 0 else "inverse"
+            delta_color = "normal" if resultados_dia['resultado_total'] >= 0 else "inverse"
+            
+            col1.metric(
+                "💵 Resultado Total",
+                f"R$ {resultados_dia['resultado_total']:,.2f}",
+                delta=f"{'✅' if resultados_dia['resultado_total'] > 0 else '❌'}",
+                delta_color=delta_color
+            )
+            
+            col2.metric(
+                "📊 Volume Negociado",
+                f"R$ {resultados_dia['volume_total']:,.2f}"
+            )
+            
+            col3.metric(
+                "🔢 Nº Operações",
+                resultados_dia['num_operacoes']
+            )
+            
+            col4.metric(
+                "✅ Taxa de Acerto",
+                f"{resultados_dia['taxa_acerto']:.1f}%",
+                delta=f"{resultados_dia['ops_positivas']}/{resultados_dia['num_operacoes']}"
+            )
+            
+            col5.metric(
+                "📈 DT / 📊 ST",
+                f"R$ {resultados_dia['resultado_dt']:.2f}",
+                delta=f"ST: R$ {resultados_dia['resultado_st']:.2f}"
+            )
+            
+            # Tabela detalhada das operações do dia
+            st.markdown("#### 📋 Operações Realizadas Hoje")
+            
+            df_dia_display = resultados_dia['df_operacoes'].copy()
+            
+            # Formatar hora
+            if 'Hora' in df_dia_display.columns:
+                df_dia_display['Hora'] = df_dia_display['Hora'].astype(str)
+            
+            # Adicionar emoji visual ao resultado
+            df_dia_display['Status'] = df_dia_display['Resultado'].apply(
+                lambda x: '✅ Lucro' if x > 0 else '❌ Prejuízo' if x < 0 else '➖ Zero'
+            )
+            
+            # Reordenar colunas
+            colunas_exibir = ['Hora', 'Ticket', 'Tipo', 'Tipo Ativo', 'Status', 'Resultado', 'Volume Venda']
+            df_dia_display = df_dia_display[colunas_exibir]
+            
+            st.dataframe(
+                df_dia_display.style.format({
+                    'Resultado': 'R$ {:.2f}',
+                    'Volume Venda': 'R$ {:.2f}'
+                }).apply(
+                    lambda x: ['background-color: #d4edda' if v > 0 
+                              else 'background-color: #f8d7da' if v < 0 
+                              else '' for v in df_dia_display['Resultado']], 
+                    axis=0,
+                    subset=['Resultado']
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Resumo por ticket
+            st.markdown("#### 🎯 Resultado por Ticket Hoje")
+            
+            resultado_por_ticket = resultados_dia['df_operacoes'].groupby('Ticket').agg({
+                'Resultado': 'sum',
+                'Volume Venda': 'sum',
+                'Tipo': 'count'
+            }).reset_index()
+            
+            resultado_por_ticket.columns = ['Ticket', 'Resultado', 'Volume', 'Nº Ops']
+            resultado_por_ticket = resultado_por_ticket.sort_values('Resultado', ascending=False)
+            
+            st.dataframe(
+                resultado_por_ticket.style.format({
+                    'Resultado': 'R$ {:.2f}',
+                    'Volume': 'R$ {:.2f}'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+        else:
+            st.info("📭 Nenhuma operação realizada hoje")
         
         st.markdown("---")
         
