@@ -1,5 +1,25 @@
-streamlit==1.31.0
-pandas==2.1.4
-plotly==5.18.0
-openpyxl==3.1.2
-xlsxwriter==3.1.9
+# Gestor B3 - Trader Pro - Requisitos de Instalação
+
+# Core
+streamlit>=1.31.0
+pandas>=2.1.0
+sqlite3  # Já incluído no Python padrão
+
+# Visualização
+plotly>=5.18.0
+
+# Geração de PDFs
+reportlab>=4.0.0
+
+# Módulo de Notícias (NOVO)
+feedparser>=6.0.10
+
+# Análise de Sentimento (OPCIONAL - mas recomendado)
+textblob>=0.17.1
+
+# Excel
+xlsxwriter>=3.1.9
+openpyxl>=3.1.2
+
+# Utilitários
+python-dateutil>=2.8.2

@@ -7,6 +7,7 @@ import os
 import io
 import hashlib
 from pathlib import Path
+import re
 
 # Verificar e instalar dependências opcionais
 try:
@@ -91,9 +92,17 @@ def validar_operacao(ticket, tipo, quantidade, valor, data):
     return erros
 
 def identificar_tipo_ativo(ticket):
-    """Identifica se é ação ou FII."""
-    if ticket.upper().endswith('11'):
+    """Identifica se é ação, FII, BDR ou ETF."""
+    t = ticket.upper()
+    # BDRs normalmente terminam com 34, 35, 39, 32, 33, 31
+    if t.endswith('11'):
         return 'FII'
+    if t.endswith(('34', '35', '39', '32', '33', '31')):
+        return 'BDR'
+    # ETFs normalmente terminam com 11, mas já tratados como FII acima
+    # BSLV39 é um BDR de ETF, tratar como BDR
+    if t == 'BSLV39':
+        return 'BDR'
     return 'ACAO'
 
 def verificar_venda_descoberto(ticket, quantidade, df_ops):
@@ -350,51 +359,60 @@ def calcular_ir_completo(df_res):
     
     for mes in sorted(df_res['Mês/Ano'].unique()):
         df_m = df_res[df_res['Mês/Ano'] == mes]
-        
+
         # === DAY TRADE ===
         dt_lucro = df_m[df_m['Tipo'] == 'Day Trade']['Resultado'].sum()
         dt_lucro_tributavel = dt_lucro + prejuizos['DT']
-        
+
         if dt_lucro_tributavel > 0:
             dt_imposto = dt_lucro_tributavel * 0.20
             prejuizos['DT'] = 0
         else:
             dt_imposto = 0
             prejuizos['DT'] = dt_lucro_tributavel
-        
+
         # === SWING TRADE - AÇÕES ===
         st_acao = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'ACAO')]
         st_acao_lucro = st_acao['Resultado'].sum()
         st_acao_volume = st_acao['Volume Venda'].sum()
-        
+
+        # Isenção só para ações nacionais
         if st_acao_volume <= 20000:
             st_acao_imposto = 0
             st_acao_lucro_comp = st_acao_lucro
         else:
             st_acao_lucro_tributavel = st_acao_lucro + prejuizos['ST_ACAO']
-            
             if st_acao_lucro_tributavel > 0:
                 st_acao_imposto = st_acao_lucro_tributavel * 0.15
                 prejuizos['ST_ACAO'] = 0
             else:
                 st_acao_imposto = 0
                 prejuizos['ST_ACAO'] = st_acao_lucro_tributavel
-            
             st_acao_lucro_comp = st_acao_lucro_tributavel
-        
+
+        # === SWING TRADE - BDR/ETF ===
+        st_bdr = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'BDR')]
+        st_bdr_lucro = st_bdr['Resultado'].sum()
+        st_bdr_volume = st_bdr['Volume Venda'].sum()
+        st_bdr_lucro_tributavel = st_bdr_lucro  # Prejuízo acumulado pode ser implementado se necessário
+        if st_bdr_lucro_tributavel > 0:
+            st_bdr_imposto = st_bdr_lucro_tributavel * 0.15
+        else:
+            st_bdr_imposto = 0
+
         # === SWING TRADE - FII ===
         st_fii = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'FII')]
         st_fii_lucro = st_fii['Resultado'].sum()
         st_fii_volume = st_fii['Volume Venda'].sum()
         st_fii_lucro_tributavel = st_fii_lucro + prejuizos['ST_FII']
-        
+
         if st_fii_lucro_tributavel > 0:
             st_fii_imposto = st_fii_lucro_tributavel * 0.20
             prejuizos['ST_FII'] = 0
         else:
             st_fii_imposto = 0
             prejuizos['ST_FII'] = st_fii_lucro_tributavel
-        
+
         res_mensal.append({
             'Mês/Ano': mes,
             'Lucro DT': dt_lucro,
@@ -405,16 +423,19 @@ def calcular_ir_completo(df_res):
             'Isento?': 'Sim' if st_acao_volume <= 20000 else 'Não',
             'Prej. ST Ações': prejuizos['ST_ACAO'],
             'Imposto ST Ações (15%)': st_acao_imposto,
+            'Lucro ST BDR': st_bdr_lucro,
+            'Volume ST BDR': st_bdr_volume,
+            'Imposto ST BDR (15%)': st_bdr_imposto,
             'Lucro ST FII': st_fii_lucro,
             'Volume ST FII': st_fii_volume,
             'Prej. ST FII': prejuizos['ST_FII'],
             'Imposto ST FII (20%)': st_fii_imposto,
-            'Total IR': dt_imposto + st_acao_imposto + st_fii_imposto
+            'Total IR': dt_imposto + st_acao_imposto + st_bdr_imposto + st_fii_imposto
         })
     
     return pd.DataFrame(res_mensal)
 
-# --- NOVA FUNÇÃO: CALCULAR RESULTADOS DO DIA ---
+# --- FUNÇÃO: CALCULAR RESULTADOS DO DIA ---
 def calcular_resultados_dia(df_res, data_referencia=None):
     """Calcula resultados das operações do dia."""
     if df_res.empty:
@@ -819,8 +840,8 @@ else:
         st.markdown("# 📊 Menu")
         pag = st.radio(
             "Navegação",
-            ["🏠 Home", "📊 Dashboard Completo", "📝 Registrar Operação", "💰 Registrar Proventos", 
-             "🏢 Posição", "📊 Resultados & IR", "🧾 Módulo Fiscal (DARF)", 
+            ["🏠 Home", "📊 Dashboard Completo", "📝 Registrar Operação", 
+             "💰 Registrar Proventos", "🏢 Posição", "📊 Resultados & IR", "🧾 Módulo Fiscal (DARF)", 
              "🔍 Histórico por Ticket", "⚙️ Gestão de Dados"],
             label_visibility="collapsed"
         )
@@ -864,7 +885,7 @@ else:
         
         st.markdown("---")
         
-        # === NOVA SEÇÃO: RESULTADOS DO DIA ===
+        # === SEÇÃO: RESULTADOS DO DIA ===
         st.subheader(f"📅 Resultados de Hoje ({datetime.now().strftime('%d/%m/%Y')})")
         
         resultados_dia = calcular_resultados_dia(df_res)
