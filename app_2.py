@@ -39,6 +39,11 @@ st.set_page_config(
 
 BLUE_CHIPS = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "MGLU3"]
 FIIS = ["HGLG11", "KNRI11", "MXRF11", "VISC11", "XPML11", "BTLG11"]
+ETFS_CONHECIDOS = [
+    'BOVA11', 'SMAL11', 'IVVB11', 'PIBB11', 'BRAX11', 
+    'DIVO11', 'FIND11', 'MATB11', 'GOVE11', 'ISUS11',
+    'SPXI11', 'HASH11', 'B5P211', 'XMAL11', 'GOLD11'
+]
 SENHA_HASH = hashlib.sha256("1234".encode()).hexdigest()
 
 # --- MIGRAÇÃO DE BANCO DE DADOS ---
@@ -94,15 +99,20 @@ def validar_operacao(ticket, tipo, quantidade, valor, data):
 def identificar_tipo_ativo(ticket):
     """Identifica se é ação, FII, BDR ou ETF."""
     t = ticket.upper()
-    # BDRs normalmente terminam com 34, 35, 39, 32, 33, 31
-    if t.endswith('11'):
-        return 'FII'
+    
+    # BDRs terminam com 34, 35, 39, 32, 33, 31
     if t.endswith(('34', '35', '39', '32', '33', '31')):
         return 'BDR'
-    # ETFs normalmente terminam com 11, mas já tratados como FII acima
-    # BSLV39 é um BDR de ETF, tratar como BDR
-    if t == 'BSLV39':
-        return 'BDR'
+    
+    # ETFs - verificar lista conhecida ANTES de classificar como FII
+    if t in ETFS_CONHECIDOS:
+        return 'ETF'
+    
+    # FIIs terminam com 11 (mas já excluímos ETFs acima)
+    if t.endswith('11'):
+        return 'FII'
+    
+    # Ações brasileiras (padrão)
     return 'ACAO'
 
 def verificar_venda_descoberto(ticket, quantidade, df_ops):
@@ -197,6 +207,8 @@ def init_db():
                   valor_total REAL,
                   dt_imposto REAL,
                   st_acao_imposto REAL,
+                  st_bdr_imposto REAL,
+                  st_etf_imposto REAL,
                   st_fii_imposto REAL,
                   codigo_darf TEXT,
                   vencimento TEXT,
@@ -351,16 +363,19 @@ def calcular_ir_completo(df_res):
     res_mensal = []
     
     # Controle de prejuízos acumulados por tipo
+    # IMPORTANTE: Cada tipo tem pool separado de compensação
     prejuizos = {
-        'DT': 0,
-        'ST_ACAO': 0,
-        'ST_FII': 0
+        'DT': 0,           # Day Trade (todos os ativos)
+        'ST_ACAO': 0,      # Swing Trade - Ações (ÚNICO com isenção R$ 20k)
+        'ST_BDR': 0,       # Swing Trade - BDRs (SEM isenção)
+        'ST_ETF': 0,       # Swing Trade - ETFs (SEM isenção)
+        'ST_FII': 0        # Swing Trade - FIIs (SEM isenção)
     }
     
     for mes in sorted(df_res['Mês/Ano'].unique()):
         df_m = df_res[df_res['Mês/Ano'] == mes]
 
-        # === DAY TRADE ===
+        # === DAY TRADE (todos os ativos) ===
         dt_lucro = df_m[df_m['Tipo'] == 'Day Trade']['Resultado'].sum()
         dt_lucro_tributavel = dt_lucro + prejuizos['DT']
 
@@ -371,15 +386,14 @@ def calcular_ir_completo(df_res):
             dt_imposto = 0
             prejuizos['DT'] = dt_lucro_tributavel
 
-        # === SWING TRADE - AÇÕES ===
+        # === SWING TRADE - AÇÕES BRASILEIRAS (COM isenção R$ 20k) ===
         st_acao = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'ACAO')]
         st_acao_lucro = st_acao['Resultado'].sum()
         st_acao_volume = st_acao['Volume Venda'].sum()
 
-        # Isenção só para ações nacionais
         if st_acao_volume <= 20000:
             st_acao_imposto = 0
-            st_acao_lucro_comp = st_acao_lucro
+            # Mesmo isento, mantém o lucro/prejuízo para controle
         else:
             st_acao_lucro_tributavel = st_acao_lucro + prejuizos['ST_ACAO']
             if st_acao_lucro_tributavel > 0:
@@ -388,19 +402,34 @@ def calcular_ir_completo(df_res):
             else:
                 st_acao_imposto = 0
                 prejuizos['ST_ACAO'] = st_acao_lucro_tributavel
-            st_acao_lucro_comp = st_acao_lucro_tributavel
 
-        # === SWING TRADE - BDR/ETF ===
+        # === SWING TRADE - BDRs (SEM isenção, 15%) ===
         st_bdr = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'BDR')]
         st_bdr_lucro = st_bdr['Resultado'].sum()
         st_bdr_volume = st_bdr['Volume Venda'].sum()
-        st_bdr_lucro_tributavel = st_bdr_lucro  # Prejuízo acumulado pode ser implementado se necessário
+        st_bdr_lucro_tributavel = st_bdr_lucro + prejuizos['ST_BDR']
+        
         if st_bdr_lucro_tributavel > 0:
             st_bdr_imposto = st_bdr_lucro_tributavel * 0.15
+            prejuizos['ST_BDR'] = 0
         else:
             st_bdr_imposto = 0
+            prejuizos['ST_BDR'] = st_bdr_lucro_tributavel
 
-        # === SWING TRADE - FII ===
+        # === SWING TRADE - ETFs (SEM isenção, 15%) ===
+        st_etf = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'ETF')]
+        st_etf_lucro = st_etf['Resultado'].sum()
+        st_etf_volume = st_etf['Volume Venda'].sum()
+        st_etf_lucro_tributavel = st_etf_lucro + prejuizos['ST_ETF']
+        
+        if st_etf_lucro_tributavel > 0:
+            st_etf_imposto = st_etf_lucro_tributavel * 0.15
+            prejuizos['ST_ETF'] = 0
+        else:
+            st_etf_imposto = 0
+            prejuizos['ST_ETF'] = st_etf_lucro_tributavel
+
+        # === SWING TRADE - FIIs (SEM isenção, 20%) ===
         st_fii = df_m[(df_m['Tipo'] == 'Swing Trade') & (df_m['Tipo Ativo'] == 'FII')]
         st_fii_lucro = st_fii['Resultado'].sum()
         st_fii_volume = st_fii['Volume Venda'].sum()
@@ -413,24 +442,44 @@ def calcular_ir_completo(df_res):
             st_fii_imposto = 0
             prejuizos['ST_FII'] = st_fii_lucro_tributavel
 
+        # Total de impostos
+        total_ir = dt_imposto + st_acao_imposto + st_bdr_imposto + st_etf_imposto + st_fii_imposto
+
         res_mensal.append({
             'Mês/Ano': mes,
+            
+            # Day Trade
             'Lucro DT': dt_lucro,
             'Prej. DT Acum.': prejuizos['DT'],
             'Imposto DT (20%)': dt_imposto,
+            
+            # Ações (COM isenção)
             'Lucro ST Ações': st_acao_lucro,
             'Volume ST Ações': st_acao_volume,
-            'Isento?': 'Sim' if st_acao_volume <= 20000 else 'Não',
+            'Isento Ações?': 'Sim' if st_acao_volume <= 20000 else 'Não',
             'Prej. ST Ações': prejuizos['ST_ACAO'],
             'Imposto ST Ações (15%)': st_acao_imposto,
+            
+            # BDRs (SEM isenção)
             'Lucro ST BDR': st_bdr_lucro,
             'Volume ST BDR': st_bdr_volume,
+            'Prej. ST BDR': prejuizos['ST_BDR'],
             'Imposto ST BDR (15%)': st_bdr_imposto,
+            
+            # ETFs (SEM isenção)
+            'Lucro ST ETF': st_etf_lucro,
+            'Volume ST ETF': st_etf_volume,
+            'Prej. ST ETF': prejuizos['ST_ETF'],
+            'Imposto ST ETF (15%)': st_etf_imposto,
+            
+            # FIIs (SEM isenção)
             'Lucro ST FII': st_fii_lucro,
             'Volume ST FII': st_fii_volume,
             'Prej. ST FII': prejuizos['ST_FII'],
             'Imposto ST FII (20%)': st_fii_imposto,
-            'Total IR': dt_imposto + st_acao_imposto + st_bdr_imposto + st_fii_imposto
+            
+            # Total
+            'Total IR': total_ir
         })
     
     return pd.DataFrame(res_mensal)
@@ -541,10 +590,22 @@ def gerar_darf_pdf(mes_ano, df_ir_mes, tipo_imposto='CONSOLIDADO'):
                 dados_tabela.append(['Swing Trade - Ações', '6015', '15%', f'{st_acao_valor:.2f}'])
                 total += st_acao_valor
         
+        if tipo_imposto == 'CONSOLIDADO' or tipo_imposto == 'SWING_BDR':
+            st_bdr_valor = df_ir_mes['Imposto ST BDR (15%)'].iloc[0]
+            if st_bdr_valor > 0:
+                dados_tabela.append(['Swing Trade - BDRs', '6015', '15%', f'{st_bdr_valor:.2f}'])
+                total += st_bdr_valor
+        
+        if tipo_imposto == 'CONSOLIDADO' or tipo_imposto == 'SWING_ETF':
+            st_etf_valor = df_ir_mes['Imposto ST ETF (15%)'].iloc[0]
+            if st_etf_valor > 0:
+                dados_tabela.append(['Swing Trade - ETFs', '6015', '15%', f'{st_etf_valor:.2f}'])
+                total += st_etf_valor
+        
         if tipo_imposto == 'CONSOLIDADO' or tipo_imposto == 'SWING_FII':
             st_fii_valor = df_ir_mes['Imposto ST FII (20%)'].iloc[0]
             if st_fii_valor > 0:
-                dados_tabela.append(['Swing Trade - FII', '8523', '20%', f'{st_fii_valor:.2f}'])
+                dados_tabela.append(['Swing Trade - FIIs', '8523', '20%', f'{st_fii_valor:.2f}'])
                 total += st_fii_valor
         
         dados_tabela.append(['', '', '<b>TOTAL</b>', f'<b>{total:.2f}</b>'])
@@ -580,10 +641,11 @@ def gerar_darf_pdf(mes_ano, df_ir_mes, tipo_imposto='CONSOLIDADO'):
         obs_text = """
         <b>OBSERVAÇÕES IMPORTANTES:</b><br/>
         1. Este é um documento auxiliar. A DARF oficial deve ser emitida pelo site da Receita Federal<br/>
-        2. Código 6015: Renda Variável - Day Trade (20%) ou Ações comuns (15%)<br/>
+        2. Código 6015: Renda Variável - Day Trade (20%) ou Swing Trade Ações/BDRs/ETFs (15%)<br/>
         3. Código 8523: Fundos Imobiliários (20%)<br/>
         4. Pagamento até o último dia útil do mês seguinte ao da operação<br/>
         5. Prejuízos podem ser compensados em meses futuros<br/>
+        6. ATENÇÃO: Apenas ações brasileiras têm isenção de R$ 20.000/mês em swing trade<br/>
         """
         story.append(Paragraph(obs_text, styles['Normal']))
         
@@ -604,15 +666,17 @@ def salvar_darf_bd(mes_ano, df_ir_mes, arquivo_path):
         conn = sqlite3.connect('investimentos.db')
         conn.execute(
             """INSERT INTO darfs 
-               (mes_ano, data_geracao, valor_total, dt_imposto, st_acao_imposto, st_fii_imposto, 
-                codigo_darf, vencimento, arquivo_path) 
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (mes_ano, data_geracao, valor_total, dt_imposto, st_acao_imposto, st_bdr_imposto, 
+                st_etf_imposto, st_fii_imposto, codigo_darf, vencimento, arquivo_path) 
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 mes_ano,
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 df_ir_mes['Total IR'].iloc[0],
                 df_ir_mes['Imposto DT (20%)'].iloc[0],
                 df_ir_mes['Imposto ST Ações (15%)'].iloc[0],
+                df_ir_mes['Imposto ST BDR (15%)'].iloc[0],
+                df_ir_mes['Imposto ST ETF (15%)'].iloc[0],
                 df_ir_mes['Imposto ST FII (20%)'].iloc[0],
                 '6015/8523',
                 vencimento.strftime('%Y-%m-%d'),
@@ -678,6 +742,8 @@ def gerar_alertas(df_pos, df_ir, df_res):
         prejuizos_totais = (
             df_ir.iloc[-1]['Prej. DT Acum.'] +
             df_ir.iloc[-1]['Prej. ST Ações'] +
+            df_ir.iloc[-1]['Prej. ST BDR'] +
+            df_ir.iloc[-1]['Prej. ST ETF'] +
             df_ir.iloc[-1]['Prej. ST FII']
         )
         
@@ -1103,7 +1169,7 @@ else:
         st.header("📝 Nova Operação")
         
         tickets_existentes = sorted(list(set(
-            df_ops['ticket'].tolist() if not df_ops.empty else [] + BLUE_CHIPS + FIIS
+            df_ops['ticket'].tolist() if not df_ops.empty else [] + BLUE_CHIPS + FIIS + ETFS_CONHECIDOS
         )))
         tickets_existentes.insert(0, "➕ DIGITAR NOVO...")
         
@@ -1162,7 +1228,10 @@ else:
                     # Limpar cache
                     carregar_dados.clear()
                     
+                    # Mostrar tipo identificado
+                    tipo_ativo = identificar_tipo_ativo(ticket_final)
                     st.success(f"✅ Operação registrada: {tipo_op} de {qtd_op} {ticket_final} @ R$ {val_op:.2f}")
+                    st.info(f"🏷️ Tipo identificado: {tipo_ativo}")
                     st.balloons()
                     st.rerun()
     
@@ -1225,6 +1294,14 @@ else:
         if not df_ir.empty:
             st.subheader("📋 Resumo Mensal de IR")
             
+            # Informação importante sobre tributação
+            st.info("""
+            📌 **Regras de Tributação:**
+            - ✅ **Ações Brasileiras**: Isenção até R$ 20.000/mês em swing trade
+            - ❌ **BDRs, ETFs e FIIs**: SEM isenção de R$ 20.000/mês
+            - Prejuízos são compensados separadamente por categoria
+            """)
+            
             st.dataframe(
                 df_ir.style.format({
                     'Lucro DT': 'R$ {:.2f}',
@@ -1234,6 +1311,14 @@ else:
                     'Volume ST Ações': 'R$ {:.2f}',
                     'Prej. ST Ações': 'R$ {:.2f}',
                     'Imposto ST Ações (15%)': 'R$ {:.2f}',
+                    'Lucro ST BDR': 'R$ {:.2f}',
+                    'Volume ST BDR': 'R$ {:.2f}',
+                    'Prej. ST BDR': 'R$ {:.2f}',
+                    'Imposto ST BDR (15%)': 'R$ {:.2f}',
+                    'Lucro ST ETF': 'R$ {:.2f}',
+                    'Volume ST ETF': 'R$ {:.2f}',
+                    'Prej. ST ETF': 'R$ {:.2f}',
+                    'Imposto ST ETF (15%)': 'R$ {:.2f}',
                     'Lucro ST FII': 'R$ {:.2f}',
                     'Volume ST FII': 'R$ {:.2f}',
                     'Prej. ST FII': 'R$ {:.2f}',
@@ -1291,7 +1376,7 @@ else:
                 with col2:
                     tipo_darf = st.selectbox(
                         "Tipo de DARF",
-                        ["CONSOLIDADO", "DAY_TRADE", "SWING_ACAO", "SWING_FII"]
+                        ["CONSOLIDADO", "DAY_TRADE", "SWING_ACAO", "SWING_BDR", "SWING_ETF", "SWING_FII"]
                     )
                 
                 df_ir_mes = df_ir[df_ir['Mês/Ano'] == mes_selecionado]
@@ -1300,11 +1385,14 @@ else:
                     st.markdown("---")
                     st.subheader("Resumo do Mês")
                     
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("Day Trade (20%)", f"R$ {df_ir_mes['Imposto DT (20%)'].iloc[0]:.2f}")
-                    col2.metric("Swing Ações (15%)", f"R$ {df_ir_mes['Imposto ST Ações (15%)'].iloc[0]:.2f}")
-                    col3.metric("Swing FII (20%)", f"R$ {df_ir_mes['Imposto ST FII (20%)'].iloc[0]:.2f}")
-                    col4.metric("TOTAL IR", f"R$ {df_ir_mes['Total IR'].iloc[0]:.2f}")
+                    col2.metric("Ações (15%)", f"R$ {df_ir_mes['Imposto ST Ações (15%)'].iloc[0]:.2f}")
+                    col3.metric("BDRs (15%)", f"R$ {df_ir_mes['Imposto ST BDR (15%)'].iloc[0]:.2f}")
+                    col4.metric("ETFs (15%)", f"R$ {df_ir_mes['Imposto ST ETF (15%)'].iloc[0]:.2f}")
+                    col5.metric("FIIs (20%)", f"R$ {df_ir_mes['Imposto ST FII (20%)'].iloc[0]:.2f}")
+                    
+                    st.metric("**TOTAL IR**", f"R$ {df_ir_mes['Total IR'].iloc[0]:.2f}")
                     
                     st.markdown("---")
                     
@@ -1337,11 +1425,14 @@ else:
                 st.info("""
                 **📌 Informações Importantes:**
                 
-                - **Código 6015**: Renda Variável (Day Trade 20% ou Swing Trade Ações 15%)
-                - **Código 8523**: Fundos de Investimento Imobiliário (20%)
+                - **Código 6015**: Renda Variável
+                  - Day Trade: 20%
+                  - Swing Trade (Ações/BDRs/ETFs): 15%
+                - **Código 8523**: Fundos Imobiliários (20%)
                 - **Vencimento**: Último dia útil do mês seguinte ao da operação
-                - **Isenção**: Vendas de ações até R$ 20.000/mês em swing trade
-                - **Prejuízos**: Podem ser compensados em meses futuros
+                - **Isenção R$ 20.000**: Apenas para ações brasileiras em swing trade
+                - **BDRs e ETFs**: NÃO têm isenção de R$ 20.000/mês
+                - **Prejuízos**: Podem ser compensados em meses futuros (pools separados)
                 
                 ⚠️ Este documento é auxiliar. A DARF oficial deve ser emitida pelo site da Receita Federal.
                 """)
@@ -1357,6 +1448,8 @@ else:
                         'valor_total': 'R$ {:.2f}',
                         'dt_imposto': 'R$ {:.2f}',
                         'st_acao_imposto': 'R$ {:.2f}',
+                        'st_bdr_imposto': 'R$ {:.2f}',
+                        'st_etf_imposto': 'R$ {:.2f}',
                         'st_fii_imposto': 'R$ {:.2f}'
                     }),
                     use_container_width=True,
@@ -1396,6 +1489,10 @@ else:
         
         if todos_tickets:
             ticket_escolhido = st.selectbox("🎫 Selecione o Ticket", todos_tickets)
+            
+            # Mostrar tipo do ativo
+            tipo_ativo = identificar_tipo_ativo(ticket_escolhido)
+            st.info(f"🏷️ Tipo: **{tipo_ativo}**")
             
             tab1, tab2, tab3 = st.tabs(["📝 Operações", "💰 Proventos", "📊 Resumo"])
             
