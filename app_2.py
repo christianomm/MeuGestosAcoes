@@ -536,6 +536,58 @@ def calcular_resultados_dia(df_res, data_referencia=None):
         'taxa_acerto': taxa_acerto
     }
 
+# --- NOVA FUNÇÃO: CALCULAR RESULTADOS DO MÊS ---
+def calcular_resultados_mes(df_res, mes_ano=None):
+    """Calcula resultados das operações do mês."""
+    if df_res.empty:
+        return None
+    
+    if mes_ano is None:
+        mes_ano = datetime.now().strftime('%Y-%m')
+    
+    # Filtrar operações do mês
+    df_mes = df_res[df_res['Mês/Ano'] == mes_ano]
+    
+    if df_mes.empty:
+        return None
+    
+    # Calcular totais
+    resultado_total = df_mes['Resultado'].sum()
+    volume_total = df_mes['Volume Venda'].sum()
+    num_operacoes = len(df_mes)
+    
+    # Separar por tipo
+    dt_ops = df_mes[df_mes['Tipo'] == 'Day Trade']
+    st_ops = df_mes[df_mes['Tipo'] == 'Swing Trade']
+    
+    resultado_dt = dt_ops['Resultado'].sum() if not dt_ops.empty else 0
+    resultado_st = st_ops['Resultado'].sum() if not st_ops.empty else 0
+    
+    # Operações positivas e negativas
+    ops_positivas = len(df_mes[df_mes['Resultado'] > 0])
+    ops_negativas = len(df_mes[df_mes['Resultado'] < 0])
+    
+    taxa_acerto = (ops_positivas / num_operacoes * 100) if num_operacoes > 0 else 0
+    
+    # Melhor e pior operação
+    melhor_trade = df_mes['Resultado'].max()
+    pior_trade = df_mes['Resultado'].min()
+    
+    return {
+        'df_operacoes': df_mes,
+        'resultado_total': resultado_total,
+        'volume_total': volume_total,
+        'num_operacoes': num_operacoes,
+        'resultado_dt': resultado_dt,
+        'resultado_st': resultado_st,
+        'ops_positivas': ops_positivas,
+        'ops_negativas': ops_negativas,
+        'taxa_acerto': taxa_acerto,
+        'melhor_trade': melhor_trade,
+        'pior_trade': pior_trade,
+        'mes_ano': mes_ano
+    }
+
 # --- FUNÇÕES DE GERAÇÃO DE PDF DARF ---
 def gerar_darf_pdf(mes_ano, df_ir_mes, tipo_imposto='CONSOLIDADO'):
     """Gera PDF da DARF com dados fiscais."""
@@ -936,23 +988,126 @@ else:
     if pag == "🏠 Home":
         st.title("🏠 Painel Geral")
         
-        # Métricas principais
-        col1, col2, col3, col4 = st.columns(4)
+        # === SEÇÃO 1: MÉTRICAS PRINCIPAIS ===
+        st.markdown("### 📊 Indicadores Principais")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         patrimonio = df_pos['Total'].sum() if not df_pos.empty else 0
-        lucro_vendas = df_res['Resultado'].sum() if not df_res.empty else 0
+        lucro_consolidado = df_res['Resultado'].sum() if not df_res.empty else 0
         proventos = df_prov['valor'].sum() if not df_prov.empty else 0
         ir_mes = df_ir.iloc[-1]['Total IR'] if not df_ir.empty else 0
         
+        # Calcular lucro do mês atual
+        mes_atual = datetime.now().strftime('%Y-%m')
+        lucro_mes_atual = df_res[df_res['Mês/Ano'] == mes_atual]['Resultado'].sum() if not df_res.empty else 0
+        
         col1.metric("💼 Patrimônio", f"R$ {patrimonio:,.2f}")
-        col2.metric("📈 Lucro em Vendas", f"R$ {lucro_vendas:,.2f}")
-        col3.metric("💰 Proventos", f"R$ {proventos:,.2f}")
-        col4.metric("🧾 IR Mês Atual", f"R$ {ir_mes:,.2f}")
+        col2.metric("📈 Lucro Consolidado", f"R$ {lucro_consolidado:,.2f}")
+        col3.metric(
+            "📅 Lucro Mês Atual", 
+            f"R$ {lucro_mes_atual:,.2f}",
+            delta=f"{lucro_mes_atual:,.2f}",
+            delta_color="normal" if lucro_mes_atual >= 0 else "inverse"
+        )
+        col4.metric("💰 Proventos", f"R$ {proventos:,.2f}")
+        col5.metric("🧾 IR Mês Atual", f"R$ {ir_mes:,.2f}")
         
         st.markdown("---")
         
-        # === SEÇÃO: RESULTADOS DO DIA ===
-        st.subheader(f"📅 Resultados de Hoje ({datetime.now().strftime('%d/%m/%Y')})")
+        # === SEÇÃO 2: RESUMO DO MÊS ATUAL ===
+        st.markdown(f"### 📅 Desempenho do Mês - {datetime.now().strftime('%B/%Y').capitalize()}")
+        
+        resultados_mes = calcular_resultados_mes(df_res)
+        
+        if resultados_mes:
+            # Métricas do mês
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            
+            cor_resultado = "normal" if resultados_mes['resultado_total'] >= 0 else "inverse"
+            
+            col1.metric(
+                "💵 Resultado Total",
+                f"R$ {resultados_mes['resultado_total']:,.2f}",
+                delta=f"{'✅' if resultados_mes['resultado_total'] > 0 else '❌'}",
+                delta_color=cor_resultado
+            )
+            
+            col2.metric(
+                "📊 Volume",
+                f"R$ {resultados_mes['volume_total']:,.2f}"
+            )
+            
+            col3.metric(
+                "🔢 Operações",
+                resultados_mes['num_operacoes']
+            )
+            
+            col4.metric(
+                "✅ Taxa Acerto",
+                f"{resultados_mes['taxa_acerto']:.1f}%"
+            )
+            
+            col5.metric(
+                "🏆 Melhor Trade",
+                f"R$ {resultados_mes['melhor_trade']:.2f}"
+            )
+            
+            col6.metric(
+                "📉 Pior Trade",
+                f"R$ {resultados_mes['pior_trade']:.2f}"
+            )
+            
+            # Gráfico de composição do mês
+            if PLOTLY_AVAILABLE:
+                col_a, col_b = st.columns(2)
+                
+                with col_a:
+                    # Gráfico DT vs ST
+                    fig = go.Figure(data=[
+                        go.Bar(
+                            name='Day Trade',
+                            x=['Day Trade'],
+                            y=[resultados_mes['resultado_dt']],
+                            marker_color='#667eea'
+                        ),
+                        go.Bar(
+                            name='Swing Trade',
+                            x=['Swing Trade'],
+                            y=[resultados_mes['resultado_st']],
+                            marker_color='#28a745'
+                        )
+                    ])
+                    fig.update_layout(
+                        title='Resultado por Tipo de Operação',
+                        yaxis_title='Resultado (R$)',
+                        height=300
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col_b:
+                    # Gráfico de operações positivas vs negativas
+                    fig = go.Figure(data=[
+                        go.Pie(
+                            labels=['Positivas', 'Negativas'],
+                            values=[resultados_mes['ops_positivas'], resultados_mes['ops_negativas']],
+                            marker_colors=['#28a745', '#dc3545'],
+                            hole=0.4
+                        )
+                    ])
+                    fig.update_layout(
+                        title='Operações Positivas vs Negativas',
+                        height=300
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+        else:
+            st.info(f"📭 Nenhuma operação realizada em {datetime.now().strftime('%B/%Y').capitalize()}")
+        
+        st.markdown("---")
+        
+        # === SEÇÃO 3: RESULTADOS DO DIA ===
+        st.markdown(f"### 📅 Resultados de Hoje ({datetime.now().strftime('%d/%m/%Y')})")
         
         resultados_dia = calcular_resultados_dia(df_res)
         
@@ -960,15 +1115,13 @@ else:
             # Métricas do dia
             col1, col2, col3, col4, col5 = st.columns(5)
             
-            # Cor do resultado total
             cor_resultado = "normal" if resultados_dia['resultado_total'] >= 0 else "inverse"
-            delta_color = "normal" if resultados_dia['resultado_total'] >= 0 else "inverse"
             
             col1.metric(
                 "💵 Resultado Total",
                 f"R$ {resultados_dia['resultado_total']:,.2f}",
                 delta=f"{'✅' if resultados_dia['resultado_total'] > 0 else '❌'}",
-                delta_color=delta_color
+                delta_color=cor_resultado
             )
             
             col2.metric(
@@ -994,68 +1147,67 @@ else:
             )
             
             # Tabela detalhada das operações do dia
-            st.markdown("#### 📋 Operações Realizadas Hoje")
-            
-            df_dia_display = resultados_dia['df_operacoes'].copy()
-            
-            # Formatar hora
-            if 'Hora' in df_dia_display.columns:
-                df_dia_display['Hora'] = df_dia_display['Hora'].astype(str)
-            
-            # Adicionar emoji visual ao resultado
-            df_dia_display['Status'] = df_dia_display['Resultado'].apply(
-                lambda x: '✅ Lucro' if x > 0 else '❌ Prejuízo' if x < 0 else '➖ Zero'
-            )
-            
-            # Reordenar colunas
-            colunas_exibir = ['Hora', 'Ticket', 'Tipo', 'Tipo Ativo', 'Status', 'Resultado', 'Volume Venda']
-            df_dia_display = df_dia_display[colunas_exibir]
-            
-            st.dataframe(
-                df_dia_display.style.format({
-                    'Resultado': 'R$ {:.2f}',
-                    'Volume Venda': 'R$ {:.2f}'
-                }).apply(
-                    lambda x: ['background-color: #d4edda' if v > 0 
-                              else 'background-color: #f8d7da' if v < 0 
-                              else '' for v in df_dia_display['Resultado']], 
-                    axis=0,
-                    subset=['Resultado']
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Resumo por ticket
-            st.markdown("#### 🎯 Resultado por Ticket Hoje")
-            
-            resultado_por_ticket = resultados_dia['df_operacoes'].groupby('Ticket').agg({
-                'Resultado': 'sum',
-                'Volume Venda': 'sum',
-                'Tipo': 'count'
-            }).reset_index()
-            
-            resultado_por_ticket.columns = ['Ticket', 'Resultado', 'Volume', 'Nº Ops']
-            resultado_por_ticket = resultado_por_ticket.sort_values('Resultado', ascending=False)
-            
-            st.dataframe(
-                resultado_por_ticket.style.format({
-                    'Resultado': 'R$ {:.2f}',
-                    'Volume': 'R$ {:.2f}'
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+            with st.expander("📋 Ver Operações Realizadas Hoje", expanded=False):
+                df_dia_display = resultados_dia['df_operacoes'].copy()
+                
+                # Formatar hora
+                if 'Hora' in df_dia_display.columns:
+                    df_dia_display['Hora'] = df_dia_display['Hora'].astype(str)
+                
+                # Adicionar emoji visual ao resultado
+                df_dia_display['Status'] = df_dia_display['Resultado'].apply(
+                    lambda x: '✅ Lucro' if x > 0 else '❌ Prejuízo' if x < 0 else '➖ Zero'
+                )
+                
+                # Reordenar colunas
+                colunas_exibir = ['Hora', 'Ticket', 'Tipo', 'Tipo Ativo', 'Status', 'Resultado', 'Volume Venda']
+                df_dia_display = df_dia_display[colunas_exibir]
+                
+                st.dataframe(
+                    df_dia_display.style.format({
+                        'Resultado': 'R$ {:.2f}',
+                        'Volume Venda': 'R$ {:.2f}'
+                    }).apply(
+                        lambda x: ['background-color: #d4edda' if v > 0 
+                                  else 'background-color: #f8d7da' if v < 0 
+                                  else '' for v in df_dia_display['Resultado']], 
+                        axis=0,
+                        subset=['Resultado']
+                    ),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Resumo por ticket
+                st.markdown("#### 🎯 Resultado por Ticket Hoje")
+                
+                resultado_por_ticket = resultados_dia['df_operacoes'].groupby('Ticket').agg({
+                    'Resultado': 'sum',
+                    'Volume Venda': 'sum',
+                    'Tipo': 'count'
+                }).reset_index()
+                
+                resultado_por_ticket.columns = ['Ticket', 'Resultado', 'Volume', 'Nº Ops']
+                resultado_por_ticket = resultado_por_ticket.sort_values('Resultado', ascending=False)
+                
+                st.dataframe(
+                    resultado_por_ticket.style.format({
+                        'Resultado': 'R$ {:.2f}',
+                        'Volume': 'R$ {:.2f}'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
             
         else:
             st.info("📭 Nenhuma operação realizada hoje")
         
         st.markdown("---")
         
-        # Alertas
+        # === SEÇÃO 4: ALERTAS ===
         alertas = gerar_alertas(df_pos, df_ir, df_res)
         if alertas:
-            st.subheader("🔔 Alertas e Notificações")
+            st.markdown("### 🔔 Alertas e Notificações")
             for alerta in alertas:
                 if alerta['tipo'] == 'warning':
                     st.warning(alerta['mensagem'])
@@ -1066,13 +1218,14 @@ else:
             
             st.markdown("---")
         
-        # Tabela resumida
+        # === SEÇÃO 5: RESUMO DA CARTEIRA ===
         if not df_pos.empty:
-            st.subheader("📋 Resumo da Carteira")
+            st.markdown("### 📋 Resumo da Carteira")
             df_display = df_pos.copy()
             total_cart = df_pos['Total'].sum()
             df_display['% Carteira'] = (df_pos['Total'] / total_cart * 100).round(2)
             
+            # Adicionar análise de variação (se houver dados históricos)
             st.dataframe(
                 df_display.style.format({
                     'Preço Médio': 'R$ {:.2f}',
@@ -1082,6 +1235,12 @@ else:
                 use_container_width=True,
                 hide_index=True
             )
+            
+            # Gráfico de composição da carteira
+            if PLOTLY_AVAILABLE and len(df_pos) > 1:
+                fig = criar_grafico_pizza_carteira(df_pos)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
     
     elif pag == "📊 Dashboard Completo":
         st.title("📊 Dashboard Completo")
