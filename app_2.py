@@ -229,7 +229,7 @@ def init_db():
         c.execute('CREATE INDEX IF NOT EXISTS idx_tipo ON operacoes(tipo)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_prov_ticket ON proventos(ticket)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_darf_mes ON darfs(mes_ano)')
-    except:
+    except:  # noqa: E722
         pass
     
     conn.commit()
@@ -610,7 +610,7 @@ def gerar_darf_pdf(mes_ano, df_ir_mes, tipo_imposto='CONSOLIDADO'):
         styles = getSampleStyleSheet()
         
         # Título
-        titulo = Paragraph(f"<b>DOCUMENTO DE ARRECADAÇÃO DE RECEITAS FEDERAIS - DARF</b>", styles['Title'])
+        titulo = Paragraph("<b>DOCUMENTO DE ARRECADAÇÃO DE RECEITAS FEDERAIS - DARF</b>", styles['Title'])
         story.append(titulo)
         story.append(Spacer(1, 20))
         
@@ -1367,7 +1367,7 @@ else:
                     if tipo_op == "Venda":
                         check = verificar_venda_descoberto(ticket_final, qtd_op, df_ops)
                         if check['descoberto']:
-                            st.warning(f"⚠️ **ATENÇÃO: Venda a Descoberto!**")
+                            st.warning("⚠️ **ATENÇÃO: Venda a Descoberto!**")
                             st.info(f"📊 Disponível: {check['qtd_disponivel']} | Faltante: {check['qtd_faltante']}")
                             st.error("⛔ Operação bloqueada. Verifique sua posição.")
                             st.stop()
