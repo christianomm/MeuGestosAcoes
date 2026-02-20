@@ -3,11 +3,18 @@ import pandas as pd
 import sqlite3
 from datetime import datetime, timedelta
 import shutil
-import os
+#import os
 import io
 import hashlib
 from pathlib import Path
-import re
+import logging
+
+logging.basicConfig(
+    level=logging.ERROR,
+    filename='progresso_app.log', # Nome do arquivo que será criado
+    filemode='a', # 'a' adiciona ao final do arquivo, 'w' sobrescreve toda vez
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Verificar e instalar dependências opcionais
 try:
@@ -62,15 +69,14 @@ def migrar_banco():
             c.execute("ALTER TABLE operacoes ADD COLUMN taxa_corretagem REAL DEFAULT 0")
             conn.commit()
         except Exception as e:
-            pass
-    
+            logging.error(f"Erro ao comitar no banco: {e}")
     # Adicionar taxa_emolumentos se não existir
     if 'taxa_emolumentos' not in colunas_existentes:
         try:
             c.execute("ALTER TABLE operacoes ADD COLUMN taxa_emolumentos REAL DEFAULT 0")
             conn.commit()
         except Exception as e:
-            pass
+            logging.error(f"Erro ao comitar no banco: {e}")
     
     conn.close()
 
@@ -229,8 +235,8 @@ def init_db():
         c.execute('CREATE INDEX IF NOT EXISTS idx_tipo ON operacoes(tipo)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_prov_ticket ON proventos(ticket)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_darf_mes ON darfs(mes_ano)')
-    except:  # noqa: E722
-        pass
+    except Exception as e: # noqa: E722
+        logging.error(f"Erro ao comitar no banco: {e}")
     
     conn.commit()
     conn.close()
