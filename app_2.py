@@ -397,9 +397,14 @@ def calcular_ir_completo(df_res):
         st_acao_lucro = st_acao['Resultado'].sum()
         st_acao_volume = st_acao['Volume Venda'].sum()
 
+        
+              
         if st_acao_volume <= 20000:
             st_acao_imposto = 0
             # Mesmo isento, mantém o lucro/prejuízo para controle
+            if st_acao_lucro < 0:
+                prejuizos['ST_ACAO'] += st_acao_lucro
+
         else:
             st_acao_lucro_tributavel = st_acao_lucro + prejuizos['ST_ACAO']
             if st_acao_lucro_tributavel > 0:
